@@ -1,0 +1,6 @@
+{
+  "name": "API Forge",
+  "description": "Plataforma personal de pruebas y observabilidad de APIs REST",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
