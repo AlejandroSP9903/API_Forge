@@ -23,8 +23,8 @@ Esta guía describe el procedimiento paso a paso para clonar, configurar, ejecut
 Abre PowerShell o Windows Terminal y sitúate en el directorio de trabajo:
 ```powershell
 cd C:\proyectos
-git clone <URL_DEL_REPOSITORIO> api-forge
-cd api-forge
+git clone https://github.com/AlejandroSP9903/API_Forge
+cd API_forge
 ```
 
 ### Paso 2.2: Instalar dependencias
