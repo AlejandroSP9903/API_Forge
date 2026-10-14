@@ -407,7 +407,7 @@ export default function App() {
                         5. Suite de Pruebas Automatizadas (Vitest + Supertest)
                       </div>
                       <p className="text-xs text-slate-400">
-                        7 pruebas ejecutadas con 100% de éxito cubriendo salud HTTP, fallo de claves foráneas y borrado en cascada.
+                        11 pruebas automatizadas con 100% de éxito cubriendo salud HTTP, creación de carpetas, persistencia real en disco, rechazo explícito de rutas inválidas y claves foráneas.
                       </p>
                     </div>
                   </div>

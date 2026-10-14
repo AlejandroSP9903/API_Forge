@@ -14,9 +14,26 @@ import type { DatabaseHealth } from '../../packages/shared/types.ts';
 
 let clientInstance: Client | null = null;
 let dbInstance: LibSQLDatabase<typeof schema> | null = null;
+let activeDatabaseUrl: string | null = null;
 
 /**
- * Asegura que el directorio contenedor del archivo SQLite exista antes de abrir la conexión
+ * Sanitiza una URL de base de datos ocultando contraseñas o tokens si estuviesen presentes
+ */
+export function sanitizeDatabaseUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  return url.replace(/\/\/[^@]+@/, '//***@');
+}
+
+/**
+ * Retorna la URL de la base de datos actualmente activa
+ */
+export function getActiveDatabaseUrl(): string | null {
+  return activeDatabaseUrl;
+}
+
+/**
+ * Asegura que el directorio contenedor del archivo SQLite exista antes de abrir la conexión.
+ * Si no se puede crear, arroja un error explícito sin ocultarlo.
  */
 function ensureDirectoryExists(url: string): void {
   if (url.startsWith('file:')) {
@@ -28,7 +45,8 @@ function ensureDirectoryExists(url: string): void {
           fs.mkdirSync(dir, { recursive: true });
           console.log(`[Database] Directorio para SQLite creado exitosamente: ${dir}`);
         } catch (err) {
-          console.warn(`[Database] No se pudo crear el directorio ${dir}:`, err);
+          console.error(`[Database] Error fatal creando el directorio '${dir}':`, err);
+          throw new Error(`Fallo al crear directorio de almacenamiento SQLite en '${dir}': ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
@@ -36,43 +54,47 @@ function ensureDirectoryExists(url: string): void {
 }
 
 /**
- * Inicializa la conexión SQLite y activa la comprobación de claves foráneas
+ * Inicializa la conexión SQLite de forma transparente y activa la comprobación de claves foráneas.
+ * No realiza fallback silencioso: si la base configurada no se puede abrir, arroja el error correspondiente.
  */
 export async function initDatabase(customUrl?: string): Promise<{ db: LibSQLDatabase<typeof schema>; client: Client }> {
-  let url = customUrl || config.databaseUrl;
+  const url = customUrl || config.databaseUrl;
 
-  if (clientInstance && !customUrl) {
+  if (clientInstance && !customUrl && activeDatabaseUrl === url) {
     return { db: dbInstance!, client: clientInstance };
   }
 
+  // Si hay una conexión previa y se solicita una nueva URL (ej. pruebas con base en memoria), cerramos la anterior
+  if (clientInstance && customUrl && activeDatabaseUrl !== customUrl) {
+    await closeDatabase();
+  }
+
+  // 1. Asegurar existencia del directorio padre si es archivo local
   ensureDirectoryExists(url);
 
+  // 2. Crear cliente SQLite/LibSQL
   let client: Client;
   try {
     client = createClient({ url });
+
     // Habilitar estrictamente las claves foráneas en SQLite
     await client.execute('PRAGMA foreign_keys = ON;');
-  } catch (primaryErr) {
-    console.warn(`[Database] Fallo conectando a ${url}: ${primaryErr}. Intentando fallback a 'file:api_forge.db'...`);
-    url = 'file:api_forge.db';
-    ensureDirectoryExists(url);
-    try {
-      client = createClient({ url });
-      await client.execute('PRAGMA foreign_keys = ON;');
-    } catch (fallbackErr) {
-      console.warn(`[Database] Fallo con archivo local, utilizando SQLite en memoria (:memory:):`, fallbackErr);
-      url = 'file::memory:?cache=shared';
-      client = createClient({ url });
-      await client.execute('PRAGMA foreign_keys = ON;');
-    }
+
+    // Verificar ejecución básica
+    await client.execute('SELECT 1 as alive;');
+  } catch (error) {
+    activeDatabaseUrl = null;
+    clientInstance = null;
+    dbInstance = null;
+    console.error(`[Database] Error crítico conectando a la base de datos '${url}':`, error);
+    throw error;
   }
 
   const db = drizzle(client, { schema });
 
-  if (!customUrl) {
-    clientInstance = client;
-    dbInstance = db;
-  }
+  activeDatabaseUrl = url;
+  clientInstance = client;
+  dbInstance = db;
 
   return { db, client };
 }
@@ -100,12 +122,26 @@ export async function getClient(): Promise<Client> {
 }
 
 /**
- * Realiza un diagnóstico en vivo del estado de SQLite y claves foráneas
+ * Realiza un diagnóstico en vivo del estado de SQLite, claves foráneas y tablas esenciales
  */
 export async function checkDatabaseHealth(): Promise<DatabaseHealth> {
   const startTime = Date.now();
+
+  // Si no hay una conexión activa inicializada, reportar desconectado inmediatamente
+  if (!clientInstance) {
+    return {
+      status: 'disconnected',
+      foreignKeys: false,
+      dialect: 'sqlite',
+      driver: '@libsql/client',
+      databaseUrl: sanitizeDatabaseUrl(activeDatabaseUrl || config.databaseUrl),
+      tablesVerified: [],
+      latencyMs: Date.now() - startTime,
+    };
+  }
+
   try {
-    const client = await getClient();
+    const client = clientInstance;
 
     // 1. Probar conectividad con SELECT 1
     await client.execute('SELECT 1 as alive;');
@@ -129,7 +165,7 @@ export async function checkDatabaseHealth(): Promise<DatabaseHealth> {
       foreignKeys: isFkEnabled,
       dialect: 'sqlite',
       driver: '@libsql/client (pure TS/Wasm & local file)',
-      databaseUrl: config.databaseUrl.replace(/\/\/[^@]+@/, '//***@'), // Ofuscar credenciales si las hubiera
+      databaseUrl: sanitizeDatabaseUrl(activeDatabaseUrl || config.databaseUrl),
       tablesVerified: verifiedTables,
       latencyMs,
     };
@@ -141,6 +177,7 @@ export async function checkDatabaseHealth(): Promise<DatabaseHealth> {
       foreignKeys: false,
       dialect: 'sqlite',
       driver: '@libsql/client',
+      databaseUrl: sanitizeDatabaseUrl(activeDatabaseUrl || config.databaseUrl),
       tablesVerified: [],
       latencyMs,
     };
@@ -152,8 +189,13 @@ export async function checkDatabaseHealth(): Promise<DatabaseHealth> {
  */
 export async function closeDatabase(): Promise<void> {
   if (clientInstance) {
-    clientInstance.close();
+    try {
+      clientInstance.close();
+    } catch (closeErr) {
+      console.warn('[Database] Advertencia al cerrar conexión SQLite:', closeErr);
+    }
     clientInstance = null;
     dbInstance = null;
+    activeDatabaseUrl = null;
   }
 }

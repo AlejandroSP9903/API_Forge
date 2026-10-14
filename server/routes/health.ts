@@ -22,7 +22,11 @@ healthRouter.get('/health', async (_req: Request, res: Response, next: NextFunct
   try {
     const dbHealth = await checkDatabaseHealth();
 
-    const isHealthy = dbHealth.status === 'connected';
+    const requiredTables = ['projects', 'api_endpoints', 'health_audit_logs'];
+    const hasRequiredTables = requiredTables.every((t) => dbHealth.tablesVerified.includes(t));
+
+    // El estado del servicio solo es 'ok' si la DB está conectada, con claves foráneas activas y tablas esenciales presentes
+    const isHealthy = dbHealth.status === 'connected' && dbHealth.foreignKeys === true && hasRequiredTables;
 
     const payload: HealthCheckResponse = {
       status: isHealthy ? 'ok' : 'degraded',
