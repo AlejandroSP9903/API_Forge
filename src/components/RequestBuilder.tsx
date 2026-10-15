@@ -31,6 +31,8 @@ import type {
   ExecuteRequestResult,
 } from '../../packages/shared/types.ts';
 import type { KeyValueItem } from '../types/hunter.ts';
+import { playSound } from '../services/audioService.ts';
+import { hasProtectedSecrets } from '../services/historySecurityService.ts';
 
 interface RequestBuilderProps {
   initialPayload?: ExecuteRequestPayload | null;
@@ -101,6 +103,7 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
   const [activeResponseTab, setActiveResponseTab] = useState<'body' | 'headers' | 'raw'>('body');
   const [copied, setCopied] = useState<boolean>(false);
   const [jsonSyntaxError, setJsonSyntaxError] = useState<string | null>(null);
+  const [hasProtectedValuesWarning, setHasProtectedValuesWarning] = useState<boolean>(false);
 
   // AbortController para cancelación en vuelo
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -110,6 +113,7 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
     if (initialPayload) {
       setMethod(initialPayload.method || 'GET');
       setUrl(initialPayload.url);
+      setHasProtectedValuesWarning(hasProtectedSecrets(initialPayload));
       if (initialPayload.queryParams) {
         const qList = Object.entries(initialPayload.queryParams).map(([k, v], i) => ({
           id: String(i + 1),
@@ -131,6 +135,8 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
       if (initialPayload.body) {
         setBodyText(typeof initialPayload.body === 'object' ? JSON.stringify(initialPayload.body, null, 2) : String(initialPayload.body));
       }
+    } else {
+      setHasProtectedValuesWarning(false);
     }
   }, [initialPayload]);
 
@@ -216,9 +222,10 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
       maxRedirects,
     };
 
-    // 4. Instanciar controlador de cancelación
+    // 4. Instanciar controlador de cancelación y reproducir inicio de solicitud
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    playSound('requestStart');
 
     try {
       const response = await fetch('/api/requests/execute', {
@@ -232,6 +239,16 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
 
       const result: ExecuteRequestResult = await response.json();
       setExecutionResult(result);
+
+      // Reproducir sonido adecuado según el resultado
+      if (result.success) {
+        playSound('requestSuccess');
+      } else if (result.error?.code === 'SSRF_BLOCKED') {
+        playSound('securityBlocked');
+      } else if (result.error?.code !== 'ABORTED') {
+        playSound('requestError');
+      }
+
       if (onExecuted) {
         onExecuted(payload, result);
       }
@@ -251,6 +268,7 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
         };
         setExecutionResult(abortedResult);
       } else {
+        playSound('requestError');
         const netErrorResult: ExecuteRequestResult = {
           success: false,
           error: {
@@ -320,6 +338,29 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
           ))}
         </div>
       </div>
+
+      {/* Aviso de valores protegidos / redactados */}
+      {hasProtectedValuesWarning && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 flex items-start justify-between gap-3 text-xs font-mono text-amber-200">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-bold text-amber-300">
+                AVISO DE SEGURIDAD // VALORES CONFIDENCIALES PROTEGIDOS:
+              </span>
+              <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                Esta solicitud se cargó desde el historial con secretos redactados (<code className="bg-amber-950/70 px-1 py-0.5 rounded text-amber-300 font-bold">[VALOR_PROTEGIDO]</code>) en sus cabeceras, parámetros o cuerpo. Por seguridad, debes ingresar nuevamente tus credenciales reales antes de ejecutar la misión.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setHasProtectedValuesWarning(false)}
+            className="text-amber-400 hover:text-white px-2 py-1 rounded bg-amber-950/50 border border-amber-500/30 text-[10px] shrink-0"
+          >
+            ENTENDIDO
+          </button>
+        </div>
+      )}
 
       {/* Barra Principal de Entrada (Método + URL + Botón Disparo) */}
       <div className="p-3 sm:p-4 rounded-xl holo-panel space-y-3 sm:space-y-0 sm:flex sm:items-center sm:gap-3">

@@ -1,7 +1,7 @@
 /**
- * API Forge - Hunter System UI (Fase 1B)
+ * API Forge - Hunter System UI (Fase 1C: Secure History + Audio System)
  * Interfaz principal inspirada en los sistemas holográficos de Solo Leveling.
- * Conecta el Request Builder, Monitor del Sistema en vivo e Historial de Misiones.
+ * Conecta el Request Builder, Monitor en vivo, Historial Seguro y Ajustes de Audio.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -32,9 +32,16 @@ import {
   AlertTriangle,
   RotateCcw,
   Sparkles,
+  Volume2,
+  VolumeX,
+  Sliders,
+  Shield,
+  KeyRound,
+  Info,
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { RequestBuilder } from './components/RequestBuilder.tsx';
+import { AudioSettingsPanel } from './components/AudioSettingsPanel.tsx';
 import type { ActiveNavTab, MissionHistoryItem } from './types/hunter.ts';
 import type {
   HealthCheckResponse,
@@ -42,6 +49,18 @@ import type {
   ExecuteRequestResult,
   HttpMethod,
 } from '../packages/shared/types.ts';
+import {
+  getAudioSettings,
+  saveAudioSettings,
+  testSound,
+  type AudioSettings,
+} from './services/audioService.ts';
+import {
+  sanitizeRequestPayload,
+  migrateAndSanitizeHistory,
+  hasProtectedSecrets,
+  REDACTED_MARKER,
+} from './services/historySecurityService.ts';
 
 const STORAGE_KEY_HISTORY = 'api_forge_hunter_history_v1';
 
@@ -54,12 +73,23 @@ export default function App() {
   const [clientPingMs, setClientPingMs] = useState<number | null>(null);
   const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
-  // Historial de solicitudes (Misiones Hunter)
+  // Estado del Sistema de Audio Hunter
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getAudioSettings());
+
+  // Historial seguro de solicitudes (Misiones Hunter con sanitización de credenciales)
   const [history, setHistory] = useState<MissionHistoryItem[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_HISTORY);
       if (stored) {
-        return JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          // Migración automática y sanitización de registros existentes
+          const { items, modifiedCount } = migrateAndSanitizeHistory(parsed);
+          if (modifiedCount > 0) {
+            localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(items.slice(0, 50)));
+          }
+          return items;
+        }
       }
     } catch {
       // ignore
@@ -71,8 +101,10 @@ export default function App() {
   const [selectedPayloadForBuilder, setSelectedPayloadForBuilder] = useState<ExecuteRequestPayload | null>(null);
   // Misión seleccionada para inspección modal
   const [inspectingMission, setInspectingMission] = useState<MissionHistoryItem | null>(null);
+  // Mensaje temporal de migración o auditoría manual
+  const [securityAuditMessage, setSecurityAuditMessage] = useState<string | null>(null);
 
-  // Guardar historial en almacenamiento local
+  // Guardar historial seguro en almacenamiento local
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(history.slice(0, 50)));
@@ -126,20 +158,24 @@ export default function App() {
     return () => clearInterval(interval);
   }, [fetchHealthStatus]);
 
-  // Manejar finalización de ejecución desde el Request Builder
+  // Manejar finalización de ejecución desde el Request Builder con SANITIZACIÓN OBLIGATORIA
   const handleRequestExecuted = useCallback((payload: ExecuteRequestPayload, result: ExecuteRequestResult) => {
+    // Sanitizar cabeceras, URL, queryParams y cuerpo antes de persistir
+    const { sanitized: cleanPayload, redactedCount } = sanitizeRequestPayload(payload);
+
     const newItem: MissionHistoryItem = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       timestamp: new Date().toISOString(),
       method: payload.method || 'GET',
-      url: payload.url,
+      url: cleanPayload.url,
       status: result.response?.status,
       statusText: result.response?.statusText,
       durationMs: result.timing.durationMs,
       success: result.success,
       errorCode: result.error?.code,
-      payload,
+      payload: cleanPayload,
       result,
+      hasProtectedSecrets: redactedCount > 0,
     };
 
     setHistory((prev) => [newItem, ...prev.slice(0, 49)]);
@@ -160,6 +196,32 @@ export default function App() {
       } catch {
         // ignore
       }
+    }
+  };
+
+  // Forzar una auditoría y re-sanitización manual de todo el historial local
+  const handleRunSecurityAudit = () => {
+    const { items: cleanItems, modifiedCount } = migrateAndSanitizeHistory(history);
+    setHistory(cleanItems);
+    try {
+      localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(cleanItems));
+    } catch {
+      // ignore
+    }
+    const protectedTotal = cleanItems.filter((i) => i.hasProtectedSecrets).length;
+    setSecurityAuditMessage(
+      `Auditoría completada: ${modifiedCount} registro(s) re-sanitizados. Total de misiones con credenciales protegidas: ${protectedTotal}.`
+    );
+    setTimeout(() => setSecurityAuditMessage(null), 5000);
+  };
+
+  // Toggle rápido de audio desde la barra superior
+  const toggleAudioQuick = () => {
+    const nextEnabled = !audioSettings.enabled;
+    const updated = saveAudioSettings({ enabled: nextEnabled });
+    setAudioSettings(updated);
+    if (nextEnabled) {
+      testSound('requestSuccess', updated.volume);
     }
   };
 
@@ -227,6 +289,7 @@ export default function App() {
   const totalMissions = history.length;
   const successfulMissions = history.filter((h) => h.success).length;
   const blockedMissions = history.filter((h) => !h.success).length;
+  const protectedMissions = history.filter((h) => h.hasProtectedSecrets).length;
   const avgLatency =
     totalMissions > 0
       ? Math.round(history.reduce((acc, h) => acc + (h.durationMs || 0), 0) / totalMissions)
@@ -241,6 +304,7 @@ export default function App() {
         healthData={healthData}
         historyCount={history.length}
         clientPingMs={clientPingMs}
+        audioEnabled={audioSettings.enabled}
       />
 
       {/* Contenedor Principal */}
@@ -255,6 +319,7 @@ export default function App() {
                 {activeTab === 'builder' && 'REQUEST BUILDER CONSOLE'}
                 {activeTab === 'monitor' && 'SYSTEM DIAGNOSTICS & STATUS'}
                 {activeTab === 'archive' && 'MISSION ARCHIVE & LOGS'}
+                {activeTab === 'settings' && 'SYSTEM SETTINGS // AUDIO'}
               </span>
             </div>
             <div className="sm:hidden font-extrabold text-sm tracking-wider text-cyan-300">
@@ -262,7 +327,34 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Control Rápido de Audio */}
+            <button
+              onClick={toggleAudioQuick}
+              title={
+                audioSettings.enabled
+                  ? 'Audio Activo (Clic para silenciar)'
+                  : 'Audio Silenciado (Clic para activar)'
+              }
+              className={`p-1.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 transition ${
+                audioSettings.enabled
+                  ? 'border-cyan-500/40 bg-cyan-950/40 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                  : 'border-slate-800 bg-[#050811] text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {audioSettings.enabled ? (
+                <>
+                  <Volume2 className="h-4 w-4 text-cyan-400" />
+                  <span className="hidden md:inline text-[10px]">AUDIO ON</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="h-4 w-4" />
+                  <span className="hidden md:inline text-[10px]">MUTED</span>
+                </>
+              )}
+            </button>
+
             {/* Estado de Conexión del Backend */}
             <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-[#050811] border border-cyan-500/20 text-xs font-mono">
               {loadingHealth && !healthData ? (
@@ -311,6 +403,14 @@ export default function App() {
           </div>
         )}
 
+        {/* Notificación de Auditoría de Seguridad */}
+        {securityAuditMessage && (
+          <div className="m-4 sm:mx-6 rounded-lg border border-cyan-500/40 bg-cyan-950/30 p-3 text-cyan-200 flex items-start gap-3 text-xs font-mono animate-fadeIn">
+            <ShieldCheck className="h-4 w-4 text-cyan-400 shrink-0 mt-0.5" />
+            <span>{securityAuditMessage}</span>
+          </div>
+        )}
+
         {/* Contenido Dinámico por Pestaña */}
         <main className="p-4 sm:p-6 flex-1 space-y-6">
           {/* TAB 1: REQUEST BUILDER */}
@@ -327,7 +427,7 @@ export default function App() {
                     PANEL DE COMPOSICIÓN Y EJECUCIÓN
                   </h2>
                   <p className="text-xs text-slate-400 max-w-2xl">
-                    Compón solicitudes HTTP nativas procesadas a través del motor del backend con escudo de seguridad SSRF activo, soporte para reintentos y medición milimétrica de latencia.
+                    Compón solicitudes HTTP nativas procesadas con escudo de seguridad SSRF activo, protección automática contra fuga de secretos en historial y efectos sintéticos Web Audio.
                   </p>
                 </div>
 
@@ -402,10 +502,10 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 3. Escudo de Seguridad SSRF */}
+                {/* 3. Escudo de Seguridad SSRF & Secretos */}
                 <div className="holo-panel rounded-xl p-4 space-y-2">
                   <div className="flex items-center justify-between text-xs text-slate-400">
-                    <span className="font-mono text-[10px] uppercase text-cyan-400/80">ESCUDO SSRF</span>
+                    <span className="font-mono text-[10px] uppercase text-cyan-400/80">ESCUDO SSRF & SECRETS</span>
                     <ShieldCheck className="h-4 w-4 text-emerald-400" />
                   </div>
                   <div>
@@ -414,12 +514,12 @@ export default function App() {
                       <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
                     </div>
                     <div className="text-xs text-slate-400 mt-0.5">
-                      Rango Privado: <span className="font-mono text-emerald-300">BLOQUEADO</span>
+                      Sanitización: <span className="font-mono text-emerald-300">REDACTION ON</span>
                     </div>
                   </div>
                   <div className="pt-2 border-t border-cyan-500/10 flex justify-between text-[11px] font-mono text-slate-500">
-                    <span>DNS Safe Check:</span>
-                    <span className="text-emerald-400 font-bold">100% STRICT</span>
+                    <span>IPs Privadas:</span>
+                    <span className="text-emerald-400 font-bold">100% BLOQUEADAS</span>
                   </div>
                 </div>
 
@@ -549,30 +649,30 @@ export default function App() {
                   </div>
 
                   {/* Fase 1B */}
-                  <div className="p-4 rounded-lg bg-cyan-950/40 border border-cyan-500/40 space-y-2 shadow-[0_0_15px_rgba(6,182,212,0.15)]">
+                  <div className="p-4 rounded-lg bg-emerald-950/20 border border-emerald-500/30 space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-cyan-400 font-bold">FASE 1B</span>
-                      <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] animate-pulse">
-                        ACTIVA
+                      <span className="text-emerald-400 font-bold">FASE 1B</span>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px]">
+                        COMPLETADA
                       </span>
                     </div>
-                    <div className="text-sm font-bold text-white">Hunter System UI</div>
-                    <p className="text-xs text-slate-300">
+                    <div className="text-sm font-bold text-slate-100">Hunter System UI</div>
+                    <p className="text-xs text-slate-400">
                       Interfaz holográfica, Request Builder, presets de misiones e historial.
                     </p>
                   </div>
 
-                  {/* Fase 2 */}
-                  <div className="p-4 rounded-lg bg-slate-950/50 border border-slate-800 space-y-2 opacity-60">
+                  {/* Fase 1C */}
+                  <div className="p-4 rounded-lg bg-cyan-950/40 border border-cyan-500/40 space-y-2 shadow-[0_0_15px_rgba(6,182,212,0.15)]">
                     <div className="flex items-center justify-between text-xs font-mono">
-                      <span className="text-slate-500 font-bold">FASE 2</span>
-                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] flex items-center gap-1">
-                        <Lock className="h-3 w-3" /> PRÓXIMA
+                      <span className="text-cyan-400 font-bold">FASE 1C</span>
+                      <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] animate-pulse">
+                        ACTIVA
                       </span>
                     </div>
-                    <div className="text-sm font-bold text-slate-300">Colecciones & Entornos</div>
-                    <p className="text-xs text-slate-500">
-                      Carpetas de misiones, variables dinámicas y guardado de colecciones en SQLite.
+                    <div className="text-sm font-bold text-white">Historial Seguro & Audio</div>
+                    <p className="text-xs text-slate-300">
+                      Redacción de secretos (Authorization/Cookies/Tokens) y Web Audio sintético.
                     </p>
                   </div>
                 </div>
@@ -601,9 +701,9 @@ export default function App() {
                   <div className="text-[11px] text-slate-500 font-mono mt-1">Escudo SSRF / Fallos</div>
                 </div>
                 <div className="holo-panel rounded-xl p-4">
-                  <div className="text-[10px] font-mono uppercase text-purple-400/80">LATENCIA MEDIA</div>
-                  <div className="text-2xl font-black text-purple-400 font-mono mt-1">{avgLatency} ms</div>
-                  <div className="text-[11px] text-slate-500 font-mono mt-1">Tiempo de ejecución</div>
+                  <div className="text-[10px] font-mono uppercase text-amber-400/80">CON SECRETOS SANITIZADOS</div>
+                  <div className="text-2xl font-black text-amber-400 font-mono mt-1">{protectedMissions}</div>
+                  <div className="text-[11px] text-slate-500 font-mono mt-1">Tokens/Cookies Redactados</div>
                 </div>
               </div>
 
@@ -613,19 +713,30 @@ export default function App() {
                   <div className="flex items-center gap-2 text-xs font-mono text-cyan-400">
                     <History className="h-4 w-4" />
                     <span className="font-bold uppercase tracking-wider">
-                      REGISTRO HISTÓRICO DE EJECUCIONES
+                      REGISTRO HISTÓRICO PROTEGIDO
                     </span>
                   </div>
 
-                  {history.length > 0 && (
+                  <div className="flex items-center gap-2">
                     <button
-                      onClick={handleClearHistory}
-                      className="px-3 py-1.5 rounded-lg bg-rose-950/30 hover:bg-rose-900/40 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-1.5 transition self-start sm:self-auto"
+                      onClick={handleRunSecurityAudit}
+                      title="Escanear y asegurar que todos los registros locales estén redactados"
+                      className="px-3 py-1.5 rounded-lg bg-cyan-950/30 hover:bg-cyan-900/40 border border-cyan-500/30 text-cyan-300 text-xs font-mono flex items-center gap-1.5 transition"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      <span>PURGAR REGISTRO</span>
+                      <Shield className="h-3.5 w-3.5 text-cyan-400" />
+                      <span>AUDITAR SECRETOS</span>
                     </button>
-                  )}
+
+                    {history.length > 0 && (
+                      <button
+                        onClick={handleClearHistory}
+                        className="px-3 py-1.5 rounded-lg bg-rose-950/30 hover:bg-rose-900/40 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-1.5 transition"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>PURGAR REGISTRO</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {history.length === 0 ? (
@@ -673,6 +784,17 @@ export default function App() {
                               {statusBadge.label}
                             </span>
 
+                            {/* Indicador de Secretos Protegidos */}
+                            {item.hasProtectedSecrets && (
+                              <span
+                                title="Esta solicitud contenía credenciales sensibles que fueron redactadas para su persistencia segura"
+                                className="text-[9px] font-mono px-1.5 py-0.2 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300 shrink-0 flex items-center gap-1"
+                              >
+                                <KeyRound className="h-2.5 w-2.5" />
+                                <span>PROTEGIDO</span>
+                              </span>
+                            )}
+
                             {/* URL */}
                             <div className="min-w-0">
                               <div className="text-xs font-mono text-slate-200 truncate font-semibold">
@@ -719,6 +841,67 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* TAB 4: AJUSTES DE SISTEMA Y AUDIO */}
+          {activeTab === 'settings' && (
+            <div className="space-y-6">
+              {/* Panel de Audio Hunter */}
+              <AudioSettingsPanel onSettingsChanged={setAudioSettings} />
+
+              {/* Panel Informativo de Seguridad del Historial y Limitaciones */}
+              <div className="holo-panel rounded-xl p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3">
+                  <div className="flex items-center gap-2 text-xs font-mono text-cyan-400">
+                    <ShieldCheck className="h-4 w-4" />
+                    <span className="font-bold uppercase tracking-wider">
+                      POLÍTICA DE PRIVACIDAD & PROTECCIÓN DE SECRETOS (FASE 1C)
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">
+                    ESCUDO ACTIVO
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div className="p-4 rounded-lg bg-[#050811] border border-cyan-500/20 space-y-2">
+                    <div className="text-cyan-300 font-bold flex items-center gap-1.5">
+                      <KeyRound className="h-4 w-4" />
+                      <span>CAMPOS SANITIZADOS AUTOMÁTICAMENTE</span>
+                    </div>
+                    <ul className="space-y-1 text-slate-400 text-[11px] list-disc list-inside leading-relaxed">
+                      <li>
+                        <strong className="text-slate-200">Cabeceras Sensibles:</strong> Authorization, Proxy-Authorization, Cookie, x-api-key, x-auth-token, access-token, etc.
+                      </li>
+                      <li>
+                        <strong className="text-slate-200">Parámetros de Consulta:</strong> api_key, token, auth, secret, password, client_secret, signature.
+                      </li>
+                      <li>
+                        <strong className="text-slate-200">URLs con Basic Auth:</strong> user:password redactado en la estructura de la URL.
+                      </li>
+                      <li>
+                        <strong className="text-slate-200">Cuerpos JSON:</strong> Claves de contraseña, tokens y secretos cifrados a <code>{REDACTED_MARKER}</code>.
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div className="p-4 rounded-lg bg-[#050811] border border-amber-500/20 space-y-2">
+                    <div className="text-amber-300 font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="h-4 w-4" />
+                      <span>LIMITACIONES DOCUMENTADAS Y BUENAS PRÁCTICAS</span>
+                    </div>
+                    <p className="text-slate-400 text-[11px] leading-relaxed">
+                      La sanitización heurística protege contra la fuga accidental de credenciales comunes. Sin embargo, no sustituye una gestión formal de secretos:
+                    </p>
+                    <ul className="space-y-1 text-slate-400 text-[11px] list-disc list-inside leading-relaxed">
+                      <li>Tokens con nombres propietarios o no estándar podrían no ser detectados.</li>
+                      <li>No utilices credenciales de producción bancaria o industrial en entornos de desarrollo local.</li>
+                      <li>El historial permanece 100% confinado a tu navegador (localStorage), sin telemetría externa.</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
 
         {/* Modal de Inspección Rápida de Misión */}
@@ -739,6 +922,15 @@ export default function App() {
               </div>
 
               <div className="p-4 overflow-y-auto space-y-4 font-mono text-xs">
+                {inspectingMission.hasProtectedSecrets && (
+                  <div className="p-2.5 rounded bg-amber-950/30 border border-amber-500/30 text-amber-300 flex items-center gap-2 text-[11px]">
+                    <ShieldAlert className="h-4 w-4 shrink-0" />
+                    <span>
+                      Esta solicitud tiene credenciales protegidas con <strong>{REDACTED_MARKER}</strong> para prevenir almacenamiento en texto plano.
+                    </span>
+                  </div>
+                )}
+
                 <div className="p-3 rounded bg-[#050811] border border-cyan-500/20 space-y-1">
                   <div className="text-[10px] text-slate-500 uppercase">SOLICITUD</div>
                   <div className="flex items-center gap-2">
@@ -787,9 +979,9 @@ export default function App() {
 
         {/* Pie de Página Holográfico */}
         <footer className="border-t border-cyan-500/20 bg-[#070b16] py-4 px-6 text-center text-xs font-mono text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div>API FORGE // SISTEMA HUNTER V1 &bull; FASE 1B (0 COP)</div>
+          <div>API FORGE // SISTEMA HUNTER V1 &bull; FASE 1C (0 COP)</div>
           <div className="text-cyan-400/60">
-            Node.js + Express + LibSQL/SQLite + Drizzle ORM + Vitest + React 19 + Tailwind
+            Node.js + Express + LibSQL/SQLite + Drizzle ORM + Vitest + React 19 + Tailwind + Web Audio API
           </div>
         </footer>
       </div>

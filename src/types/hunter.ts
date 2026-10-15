@@ -23,6 +23,7 @@ export interface MissionHistoryItem {
   errorCode?: string;
   payload: ExecuteRequestPayload;
   result?: ExecuteRequestResult;
+  hasProtectedSecrets?: boolean;
 }
 
-export type ActiveNavTab = 'builder' | 'monitor' | 'archive';
+export type ActiveNavTab = 'builder' | 'monitor' | 'archive' | 'settings';
