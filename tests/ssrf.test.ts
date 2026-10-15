@@ -25,6 +25,14 @@ describe('SSRF Protection - POST /api/requests/execute', () => {
     { label: 'red privada clase C (192.168.1.1)', url: 'http://192.168.1.1:8080' },
     { label: 'dirección link-local (169.254.1.1)', url: 'http://169.254.1.1' },
     { label: 'dirección 0.0.0.0', url: 'http://0.0.0.0:3000' },
+    { label: 'notación corta IPv4 (127.1)', url: 'http://127.1:8080' },
+    { label: 'notación de tres partes IPv4 (127.0.1)', url: 'http://127.0.1:8080' },
+    { label: 'IPv4 mapeada en IPv6 decimal (::ffff:127.0.0.1)', url: 'http://[::ffff:127.0.0.1]:8080' },
+    { label: 'IPv4 mapeada en IPv6 hexadecimal loopback (::ffff:7f00:1)', url: 'http://[::ffff:7f00:1]:8080' },
+    { label: 'IPv4 mapeada en IPv6 hexadecimal metadatos (::ffff:a9fe:a9fe)', url: 'http://[::ffff:a9fe:a9fe]' },
+    { label: 'IPv4 mapeada en IPv6 hexadecimal red 10.0.0.1 (::ffff:a00:1)', url: 'http://[::ffff:a00:1]' },
+    { label: 'IPv4 mapeada en IPv6 hexadecimal red 192.168.1.1 (::ffff:c0a8:101)', url: 'http://[::ffff:c0a8:101]' },
+    { label: 'IPv4 compatible IPv6 (::7f00:1)', url: 'http://[::7f00:1]' },
   ];
 
   for (const target of forbiddenTargets) {
@@ -43,6 +51,23 @@ describe('SSRF Protection - POST /api/requests/execute', () => {
       expect(res.body.error.message).toMatch(/bloquead[ao]|restringid[ao]|seguridad/i);
     });
   }
+
+  it('no debe abortar prematuramente cuando el cliente envía Connection: close y espera la respuesta', async () => {
+    // Prueba de regresión: verifica que req.on("close") ya no cancele la petición antes de que res finalize
+    const res = await request(app)
+      .post('/api/requests/execute')
+      .set('Connection', 'close')
+      .send({
+        url: 'http://127.0.0.1:8080',
+        method: 'GET',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(false);
+    // El motor debe procesar la solicitud y rechazarla por SSRF_BLOCKED, NO por ABORTED prematuro
+    expect(res.body.error?.code).toBe('SSRF_BLOCKED');
+    expect(res.body.error?.code).not.toBe('ABORTED');
+  });
 
   it('no debe permitir que el usuario eluda las protecciones mediante parámetros en el payload', async () => {
     // Intento malicioso de enviar banderas de prueba en la petición pública

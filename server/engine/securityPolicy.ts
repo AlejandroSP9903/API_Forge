@@ -173,15 +173,41 @@ export function isForbiddenIPv6(ip: string, allowLoopback: boolean = false): { f
     return { forbidden: true, reason: 'Dirección IPv6 no especificada (::) bloqueada' };
   }
 
-  // IPv4-mapped IPv6 ej: ::ffff:127.0.0.1 o ::ffff:7f00:1
+  // IPv4-mapped IPv6 ej: ::ffff:127.0.0.1 o ::ffff:7f00:1 o 0:0:0:0:0:ffff:...
   if (normalized.startsWith('::ffff:') || normalized.startsWith('0:0:0:0:0:ffff:')) {
-    const parts = normalized.split(':');
-    const lastPart = parts[parts.length - 1];
+    const rawMapped = normalized.replace(/^.*ffff:/, '');
 
-    // Si tiene formato de IPv4 al final (ej: 127.0.0.1)
-    const ipv4Num = parseIPv4ToNumber(lastPart);
-    if (ipv4Num !== null) {
-      return isForbiddenIPv4(ipv4Num, allowLoopback);
+    // Formato con puntos decimales: ::ffff:127.0.0.1
+    if (rawMapped.includes('.')) {
+      const ipv4Num = parseIPv4ToNumber(rawMapped);
+      if (ipv4Num !== null) {
+        return isForbiddenIPv4(ipv4Num, allowLoopback);
+      }
+    }
+
+    // Formato hexadecimal normalizado: ::ffff:7f00:1 (dos grupos hexadecimales de 16 bits)
+    const hexSegments = rawMapped.split(':');
+    if (hexSegments.length === 2) {
+      const high = parseInt(hexSegments[0], 16);
+      const low = parseInt(hexSegments[1], 16);
+      if (!isNaN(high) && !isNaN(low) && high >= 0 && high <= 0xffff && low >= 0 && low <= 0xffff) {
+        const ipv4Num = ((high << 16) | low) >>> 0;
+        return isForbiddenIPv4(ipv4Num, allowLoopback);
+      }
+    }
+  }
+
+  // IPv4-compatible IPv6 (obsoleto pero posible vector): ::127.0.0.1 o ::7f00:1
+  if (/^::[0-9a-f]{1,4}:[0-9a-f]{1,4}$/i.test(normalized)) {
+    const hexSegments = normalized.replace(/^::/, '').split(':');
+    if (hexSegments.length === 2) {
+      const high = parseInt(hexSegments[0], 16);
+      const low = parseInt(hexSegments[1], 16);
+      if (!isNaN(high) && !isNaN(low) && high >= 0 && high <= 0xffff && low >= 0 && low <= 0xffff) {
+        const ipv4Num = ((high << 16) | low) >>> 0;
+        const check = isForbiddenIPv4(ipv4Num, allowLoopback);
+        if (check.forbidden) return check;
+      }
     }
   }
 

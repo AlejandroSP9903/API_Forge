@@ -49,9 +49,11 @@ requestsRouter.post('/execute', async (req: Request, res: Response, next: NextFu
       });
     }
 
-    // 3. Crear AbortController vinculado al cierre de la conexión del cliente Express
+    // 3. Crear AbortController vinculado a la desconexión prematura real del cliente HTTP
     const clientAbortController = new AbortController();
-    req.on('close', () => {
+    res.on('close', () => {
+      // res.on('close') se emite cuando la respuesta finaliza o cuando el socket cliente se cierra prematuramente.
+      // Si res.writableEnded es falso, el cliente interrumpió la conexión antes de recibir la respuesta.
       if (!res.writableEnded) {
         clientAbortController.abort();
       }

@@ -142,11 +142,24 @@ export class HttpEngine {
         nextBody = null;
       }
 
+      // Si el origen cambia (dominio, puerto o protocolo distinto), eliminar encabezados sensibles de credenciales
+      const isSameOrigin = nextUrl.origin === reqData.url.origin;
+      const nextHeaders: Record<string, string> = { ...reqData.headers };
+      if (!isSameOrigin) {
+        for (const headerKey of Object.keys(nextHeaders)) {
+          const lower = headerKey.toLowerCase();
+          if (lower === 'authorization' || lower === 'cookie' || lower === 'proxy-authorization') {
+            delete nextHeaders[headerKey];
+          }
+        }
+      }
+
       const nextReqData: NormalizedHttpRequest = {
         ...reqData,
         url: nextUrl,
         method: nextMethod,
         body: nextBody,
+        headers: nextHeaders,
       };
 
       return this.executeWithRedirects(nextReqData, redirectsCount + 1, parentSignal);

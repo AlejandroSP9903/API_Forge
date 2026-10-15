@@ -12,6 +12,8 @@ import { HttpEngine } from '../server/engine/httpEngine.ts';
 describe('HTTP Engine - Pruebas Funcionales con Servidor Local', () => {
   let server: http.Server;
   let baseUrl: string;
+  let secondServer: http.Server;
+  let secondBaseUrl: string;
   let testEngine: HttpEngine;
 
   beforeAll(async () => {
@@ -98,11 +100,47 @@ describe('HTTP Engine - Pruebas Funcionales con Servidor Local', () => {
         return;
       }
 
+      if (parsedUrl.pathname === '/echo-headers') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ headers: req.headers }));
+        return;
+      }
+
+      if (parsedUrl.pathname === '/redirect-same-origin') {
+        res.writeHead(302, { Location: '/echo-headers' });
+        res.end();
+        return;
+      }
+
+      if (parsedUrl.pathname === '/redirect-to-second') {
+        res.writeHead(302, { Location: `${secondBaseUrl}/echo-headers` });
+        res.end();
+        return;
+      }
+
+      if (parsedUrl.pathname === '/redirect-to-private') {
+        res.writeHead(302, { Location: 'http://10.0.0.1/admin' });
+        res.end();
+        return;
+      }
+
+      if (parsedUrl.pathname === '/redirect-to-file') {
+        res.writeHead(302, { Location: 'file:///etc/passwd' });
+        res.end();
+        return;
+      }
+
+      if (parsedUrl.pathname === '/redirect-to-ipv6-mapped') {
+        res.writeHead(302, { Location: 'http://[::ffff:a9fe:a9fe]' });
+        res.end();
+        return;
+      }
+
       res.writeHead(404);
       res.end('Not Found');
     });
 
-    // 2. Iniciar en puerto dinámico asignado por el SO (puerto 0)
+    // 2. Iniciar servidor principal en puerto dinámico asignado por el SO (puerto 0)
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => {
         const address = server.address() as AddressInfo;
@@ -111,14 +149,29 @@ describe('HTTP Engine - Pruebas Funcionales con Servidor Local', () => {
       });
     });
 
-    // 3. Crear instancia del motor autorizada explícitamente solo para loopback en la suite de pruebas
+    // 3. Iniciar segundo servidor para pruebas de redirección entre orígenes distintos
+    secondServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ headers: req.headers, origin: 'second' }));
+    });
+
+    await new Promise<void>((resolve) => {
+      secondServer.listen(0, '127.0.0.1', () => {
+        const address = secondServer.address() as AddressInfo;
+        secondBaseUrl = `http://127.0.0.1:${address.port}`;
+        resolve();
+      });
+    });
+
+    // 4. Crear instancia del motor autorizada explícitamente solo para loopback en la suite de pruebas
     testEngine = new HttpEngine({ allowLoopbackForTesting: true });
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-    });
+    await Promise.all([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => secondServer.close(() => resolve())),
+    ]);
   });
 
   it('debe ejecutar una petición GET exitosa y parsear JSON correctamente', async () => {
@@ -311,5 +364,74 @@ describe('HTTP Engine - Pruebas Funcionales con Servidor Local', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('SSRF_BLOCKED');
     expect(result.error?.message).toMatch(/bloquead[ao]|metadatos|restringid[ao]/i);
+  });
+
+  it('debe despojar encabezados sensibles (Authorization, Cookie) al redirigir a un origen diferente', async () => {
+    const result = await testEngine.execute({
+      url: `${baseUrl}/redirect-to-second`,
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer token-secreto-123',
+        Cookie: 'session=secreta; id=456',
+        'X-Public-Header': 'valor-publico',
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.response?.status).toBe(200);
+    expect(result.response?.redirectsCount).toBe(1);
+
+    const receivedHeaders = (result.response?.data as { headers: Record<string, string> }).headers;
+    // Encabezado público se conserva
+    expect(receivedHeaders['x-public-header']).toBe('valor-publico');
+    // Encabezados sensibles de credenciales deben haber sido eliminados al cambiar de origen
+    expect(receivedHeaders['authorization']).toBeUndefined();
+    expect(receivedHeaders['cookie']).toBeUndefined();
+  });
+
+  it('debe conservar encabezados de autorización si la redirección permanece en el mismo origen', async () => {
+    const result = await testEngine.execute({
+      url: `${baseUrl}/redirect-same-origin`,
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer token-mismo-origen',
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.response?.status).toBe(200);
+
+    const receivedHeaders = (result.response?.data as { headers: Record<string, string> }).headers;
+    expect(receivedHeaders['authorization']).toBe('Bearer token-mismo-origen');
+  });
+
+  it('debe bloquear redirecciones hacia redes privadas como 10.0.0.1', async () => {
+    const result = await testEngine.execute({
+      url: `${baseUrl}/redirect-to-private`,
+      method: 'GET',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('SSRF_BLOCKED');
+  });
+
+  it('debe bloquear redirecciones hacia protocolos prohibidos como file:', async () => {
+    const result = await testEngine.execute({
+      url: `${baseUrl}/redirect-to-file`,
+      method: 'GET',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('FORBIDDEN_PROTOCOL');
+  });
+
+  it('debe bloquear redirecciones hacia representaciones IPv6 mapeadas restringidas', async () => {
+    const result = await testEngine.execute({
+      url: `${baseUrl}/redirect-to-ipv6-mapped`,
+      method: 'GET',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('SSRF_BLOCKED');
   });
 });
