@@ -45,6 +45,24 @@ const MAX_ALLOWED_REDIRECTS = 10;
 const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1 MB
 
 /**
+ * Sanitiza una URL para que pueda mostrarse de forma segura en mensajes de error
+ * sin exponer credenciales Basic Auth ni tokens en query params.
+ */
+export function safeUrlForErrorMessage(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  // Redactar contraseñas en Basic Auth http://user:pass@host -> http://user:[VALOR_PROTEGIDO]@host
+  let safe = rawUrl.replace(/(https?:\/\/[^:]+:)([^@]+)(@)/i, '$1[VALOR_PROTEGIDO]$3');
+  // Redactar parámetros con claves sensibles en la query string
+  safe = safe.replace(/([?&])([^=]+)=([^&#]*)/g, (match, prefix, key) => {
+    if (/(token|key|secret|password|passwd|auth|sig|signature)/i.test(key)) {
+      return `${prefix}${key}=[VALOR_PROTEGIDO]`;
+    }
+    return match;
+  });
+  return safe;
+}
+
+/**
  * Normaliza y valida una definición de solicitud entrante
  */
 export function validateAndNormalizeRequest(definition: HttpRequestDefinition): NormalizedHttpRequest {
@@ -68,7 +86,7 @@ export function validateAndNormalizeRequest(definition: HttpRequestDefinition): 
   try {
     parsedUrl = new URL(definition.url.trim());
   } catch {
-    throw new ValidationError(`La URL proporcionada '${definition.url}' no tiene un formato válido.`, 'INVALID_URL');
+    throw new ValidationError(`La URL proporcionada '${safeUrlForErrorMessage(definition.url)}' no tiene un formato válido.`, 'INVALID_URL');
   }
 
   // Validar protocolo permitido antes de evaluar el hostname
@@ -81,7 +99,7 @@ export function validateAndNormalizeRequest(definition: HttpRequestDefinition): 
   }
 
   if (!parsedUrl.hostname) {
-    throw new ValidationError(`La URL proporcionada '${definition.url}' no contiene un nombre de host válido.`, 'INVALID_URL');
+    throw new ValidationError(`La URL proporcionada '${safeUrlForErrorMessage(definition.url)}' no contiene un nombre de host válido.`, 'INVALID_URL');
   }
 
   // 4. Incorporar parámetros de consulta si se especifican

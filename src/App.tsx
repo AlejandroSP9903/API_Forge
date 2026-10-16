@@ -57,6 +57,7 @@ import {
 } from './services/audioService.ts';
 import {
   sanitizeRequestPayload,
+  sanitizeResult,
   migrateAndSanitizeHistory,
   hasProtectedSecrets,
   REDACTED_MARKER,
@@ -83,16 +84,17 @@ export default function App() {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) {
-          // Migración automática y sanitización de registros existentes
-          const { items, modifiedCount } = migrateAndSanitizeHistory(parsed);
-          if (modifiedCount > 0) {
+          // Migración automática y sanitización de registros existentes antes de mostrar o reutilizar
+          const { items, modifiedCount, corruptedCount } = migrateAndSanitizeHistory(parsed);
+          if (modifiedCount > 0 || corruptedCount > 0) {
             localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(items.slice(0, 50)));
           }
           return items;
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      // Manejar datos malformados sin lanzar error no capturado
+      console.warn('[API Forge] Error al parsear historial local:', err);
     }
     return [];
   });
@@ -161,21 +163,25 @@ export default function App() {
   // Manejar finalización de ejecución desde el Request Builder con SANITIZACIÓN OBLIGATORIA
   const handleRequestExecuted = useCallback((payload: ExecuteRequestPayload, result: ExecuteRequestResult) => {
     // Sanitizar cabeceras, URL, queryParams y cuerpo antes de persistir
-    const { sanitized: cleanPayload, redactedCount } = sanitizeRequestPayload(payload);
+    const { sanitized: cleanPayload, redactedCount: payloadRedacted } = sanitizeRequestPayload(payload);
+    // Sanitizar también respuesta (cabeceras como set-cookie, cuerpo, data y mensajes de error)
+    const { sanitizedResult: cleanResult, redactedCount: resultRedacted } = sanitizeResult(result);
+
+    const hasSecrets = payloadRedacted > 0 || resultRedacted > 0 || hasProtectedSecrets(cleanPayload, cleanResult);
 
     const newItem: MissionHistoryItem = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       timestamp: new Date().toISOString(),
-      method: payload.method || 'GET',
+      method: payload.method || cleanPayload.method || 'GET',
       url: cleanPayload.url,
-      status: result.response?.status,
-      statusText: result.response?.statusText,
-      durationMs: result.timing.durationMs,
-      success: result.success,
-      errorCode: result.error?.code,
+      status: cleanResult?.response?.status,
+      statusText: cleanResult?.response?.statusText,
+      durationMs: cleanResult?.timing?.durationMs ?? result.timing.durationMs,
+      success: cleanResult?.success ?? result.success,
+      errorCode: cleanResult?.error?.code,
       payload: cleanPayload,
-      result,
-      hasProtectedSecrets: redactedCount > 0,
+      result: cleanResult,
+      hasProtectedSecrets: hasSecrets,
     };
 
     setHistory((prev) => [newItem, ...prev.slice(0, 49)]);

@@ -32,7 +32,7 @@ import type {
 } from '../../packages/shared/types.ts';
 import type { KeyValueItem } from '../types/hunter.ts';
 import { playSound } from '../services/audioService.ts';
-import { hasProtectedSecrets } from '../services/historySecurityService.ts';
+import { hasProtectedSecrets, sanitizeText } from '../services/historySecurityService.ts';
 
 interface RequestBuilderProps {
   initialPayload?: ExecuteRequestPayload | null;
@@ -269,11 +269,13 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
         setExecutionResult(abortedResult);
       } else {
         playSound('requestError');
+        const rawMsg = err instanceof Error ? err.message : 'Error de comunicación con el backend.';
+        const { sanitizedText: safeErrMsg } = sanitizeText(rawMsg);
         const netErrorResult: ExecuteRequestResult = {
           success: false,
           error: {
             code: 'NETWORK_ERROR',
-            message: err instanceof Error ? err.message : 'Error de comunicación con el backend.',
+            message: safeErrMsg,
           },
           timing: {
             durationMs: 0,
