@@ -15,6 +15,7 @@ import {
   Server,
   Layers,
   Sliders,
+  FolderArchive,
 } from 'lucide-react';
 import type { ActiveNavTab } from '../types/hunter.ts';
 import type { HealthCheckResponse } from '../../packages/shared/types.ts';
@@ -24,6 +25,7 @@ interface SidebarProps {
   onTabChange: (tab: ActiveNavTab) => void;
   healthData: HealthCheckResponse | null;
   historyCount: number;
+  collectionsCount?: number;
   clientPingMs: number | null;
   audioEnabled?: boolean;
 }
@@ -33,6 +35,7 @@ export function Sidebar({
   onTabChange,
   healthData,
   historyCount,
+  collectionsCount = 0,
   clientPingMs,
   audioEnabled,
 }: SidebarProps) {
@@ -78,7 +81,7 @@ export function Sidebar({
           <div className="text-right">
             <div className="text-[10px] font-mono text-cyan-400/70 uppercase">Nivel Sistema</div>
             <div className="text-xs font-extrabold text-purple-400 font-mono tracking-wider">
-              FASE 1C
+              FASE 1D
             </div>
           </div>
         </div>
@@ -106,7 +109,29 @@ export function Sidebar({
           <span className="text-[10px] font-mono text-cyan-400/60">[QUEST]</span>
         </button>
 
-        {/* 2. System Monitor */}
+        {/* 2. Collections (Fase 1D) */}
+        <button
+          onClick={() => onTabChange('collections')}
+          className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${
+            activeTab === 'collections'
+              ? 'bg-gradient-to-r from-cyan-950/60 to-indigo-950/40 border border-cyan-500/40 text-cyan-300 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            <FolderArchive className={`h-4 w-4 ${activeTab === 'collections' ? 'text-cyan-400' : 'text-slate-500 group-hover:text-cyan-400'}`} />
+            <span>COLECCIONES</span>
+          </div>
+          {collectionsCount > 0 ? (
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+              {collectionsCount}
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono text-cyan-400/60">[SQLITE]</span>
+          )}
+        </button>
+
+        {/* 3. System Monitor */}
         <button
           onClick={() => onTabChange('monitor')}
           className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${
@@ -122,7 +147,7 @@ export function Sidebar({
           <span className="text-[10px] font-mono text-cyan-400/60">[STATUS]</span>
         </button>
 
-        {/* 3. Mission Archive / History */}
+        {/* 4. Mission Archive / History */}
         <button
           onClick={() => onTabChange('archive')}
           className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${
@@ -142,7 +167,7 @@ export function Sidebar({
           )}
         </button>
 
-        {/* 4. Audio & System Settings */}
+        {/* 5. Audio & System Settings */}
         <button
           onClick={() => onTabChange('settings')}
           className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${

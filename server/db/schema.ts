@@ -49,3 +49,45 @@ export type NewApiEndpoint = typeof apiEndpoints.$inferInsert;
 
 export type HealthAuditLog = typeof healthAuditLogs.$inferSelect;
 export type NewHealthAuditLog = typeof healthAuditLogs.$inferInsert;
+
+/* ==========================================================================
+ * FASE 1D: TABLAS DE COLECCIONES Y SOLICITUDES GUARDADAS
+ * ========================================================================== */
+
+/**
+ * Tabla de Colecciones de Solicitudes
+ */
+export const collections = sqliteTable('collections', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+/**
+ * Tabla de Solicitudes Guardadas dentro de Colecciones
+ * Incorpora clave foránea hacia collections con borrado en cascada
+ */
+export const savedRequests = sqliteTable('saved_requests', {
+  id: text('id').primaryKey(),
+  collectionId: text('collection_id')
+    .notNull()
+    .references(() => collections.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  method: text('method').notNull(),
+  url: text('url').notNull(),
+  headers: text('headers'),
+  queryParams: text('query_params'),
+  body: text('body'),
+  contentType: text('content_type'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export type Collection = typeof collections.$inferSelect;
+export type NewCollection = typeof collections.$inferInsert;
+
+export type SavedRequest = typeof savedRequests.$inferSelect;
+export type NewSavedRequest = typeof savedRequests.$inferInsert;
+

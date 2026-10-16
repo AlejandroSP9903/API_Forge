@@ -3,7 +3,7 @@
  * Interfaz de composición y ejecución de solicitudes HTTP con estética de Solo Leveling.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Send,
   Square,
@@ -24,6 +24,7 @@ import {
   HelpCircle,
   RotateCw,
   Crosshair,
+  FolderArchive,
 } from 'lucide-react';
 import type {
   HttpMethod,
@@ -37,6 +38,8 @@ import { hasProtectedSecrets, sanitizeText } from '../services/historySecuritySe
 interface RequestBuilderProps {
   initialPayload?: ExecuteRequestPayload | null;
   onExecuted?: (payload: ExecuteRequestPayload, result: ExecuteRequestResult) => void;
+  onSaveToCollection?: (payload: ExecuteRequestPayload) => void;
+  onPayloadChange?: (payload: ExecuteRequestPayload) => void;
 }
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -78,7 +81,12 @@ const MISSION_PRESETS = [
   },
 ];
 
-export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderProps) {
+export function RequestBuilder({
+  initialPayload,
+  onExecuted,
+  onSaveToCollection,
+  onPayloadChange,
+}: RequestBuilderProps) {
   // Estado de configuración de solicitud
   const [method, setMethod] = useState<HttpMethod>('GET');
   const [url, setUrl] = useState<string>('https://jsonplaceholder.typicode.com/posts/1');
@@ -96,6 +104,49 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
   const [bodyText, setBodyText] = useState<string>('');
   const [timeoutMs, setTimeoutMs] = useState<number>(10000);
   const [maxRedirects, setMaxRedirects] = useState<number>(5);
+
+  // Helper para construir el payload actual
+  const buildCurrentPayload = useCallback((): ExecuteRequestPayload => {
+    const cleanParams: Record<string, string> = {};
+    for (const p of queryParams) {
+      if (p.enabled && p.key.trim()) {
+        cleanParams[p.key.trim()] = p.value;
+      }
+    }
+
+    const cleanHeaders: Record<string, string> = {};
+    for (const h of headers) {
+      if (h.enabled && h.key.trim()) {
+        cleanHeaders[h.key.trim()] = h.value;
+      }
+    }
+
+    let parsedBody: string | object | null = null;
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && bodyText.trim()) {
+      try {
+        parsedBody = JSON.parse(bodyText);
+      } catch {
+        parsedBody = bodyText;
+      }
+    }
+
+    return {
+      url: url.trim(),
+      method,
+      queryParams: Object.keys(cleanParams).length > 0 ? cleanParams : undefined,
+      headers: Object.keys(cleanHeaders).length > 0 ? cleanHeaders : undefined,
+      body: parsedBody,
+      timeoutMs,
+      maxRedirects,
+    };
+  }, [url, method, queryParams, headers, bodyText, timeoutMs, maxRedirects]);
+
+  // Sincronizar hacia afuera el payload actual cuando cambia
+  useEffect(() => {
+    if (onPayloadChange) {
+      onPayloadChange(buildCurrentPayload());
+    }
+  }, [buildCurrentPayload, onPayloadChange]);
 
   // Estado de ejecución
   const [loading, setLoading] = useState<boolean>(false);
@@ -409,14 +460,28 @@ export function RequestBuilder({ initialPayload, onExecuted }: RequestBuilderPro
               <span>CANCELAR</span>
             </button>
           ) : (
-            <button
-              onClick={handleExecute}
-              disabled={!url.trim()}
-              className="w-full sm:w-auto px-6 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 border border-cyan-400/50 text-slate-950 font-mono text-xs font-black tracking-wider transition flex items-center justify-center gap-2 cyan-glow cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Send className="h-3.5 w-3.5 fill-slate-950" />
-              <span>DISPARAR MISIÓN</span>
-            </button>
+            <>
+              {onSaveToCollection && (
+                <button
+                  type="button"
+                  onClick={() => onSaveToCollection(buildCurrentPayload())}
+                  disabled={!url.trim()}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(6,182,212,0.15)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Guardar solicitud en una colección SQLite"
+                >
+                  <FolderArchive className="h-3.5 w-3.5" />
+                  <span>GUARDAR</span>
+                </button>
+              )}
+              <button
+                onClick={handleExecute}
+                disabled={!url.trim()}
+                className="w-full sm:w-auto px-6 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 border border-cyan-400/50 text-slate-950 font-mono text-xs font-black tracking-wider transition flex items-center justify-center gap-2 cyan-glow cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Send className="h-3.5 w-3.5 fill-slate-950" />
+                <span>DISPARAR MISIÓN</span>
+              </button>
+            </>
           )}
         </div>
       </div>

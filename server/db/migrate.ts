@@ -60,16 +60,50 @@ export async function runMigrations(): Promise<MigrationResult> {
       );
     `);
 
-    // 6. Verificar que las tablas existen
+    // 6. Crear tabla collections (Fase 1D)
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS collections (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
+    // 7. Crear tabla saved_requests (Fase 1D) con clave foránea hacia collections y borrado en cascada
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS saved_requests (
+        id TEXT PRIMARY KEY,
+        collection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        method TEXT NOT NULL,
+        url TEXT NOT NULL,
+        headers TEXT,
+        query_params TEXT,
+        body TEXT,
+        content_type TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+      );
+    `);
+
+    // 8. Crear índice para optimizar consultas de solicitudes por colección
+    await client.execute(`
+      CREATE INDEX IF NOT EXISTS idx_saved_requests_collection_id ON saved_requests(collection_id);
+    `);
+
+    // 9. Verificar que las tablas existen
     const tablesCheck = await client.execute(`
       SELECT name FROM sqlite_master 
-      WHERE type='table' AND name IN ('projects', 'api_endpoints', 'health_audit_logs')
+      WHERE type='table' AND name IN ('projects', 'api_endpoints', 'health_audit_logs', 'collections', 'saved_requests')
       ORDER BY name ASC;
     `);
 
     const appliedTables = tablesCheck.rows.map((r) => String(r[0]));
 
-    // 7. Verificar estado de foreign keys
+    // 10. Verificar estado de foreign keys
     const fkCheck = await client.execute('PRAGMA foreign_keys;');
     const foreignKeysActive = fkCheck.rows.length > 0 && Number(fkCheck.rows[0][0]) === 1;
 

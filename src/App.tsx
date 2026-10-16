@@ -38,9 +38,12 @@ import {
   Shield,
   KeyRound,
   Info,
+  FolderArchive,
+  FolderPlus,
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { RequestBuilder } from './components/RequestBuilder.tsx';
+import { CollectionsPanel } from './components/CollectionsPanel.tsx';
 import { AudioSettingsPanel } from './components/AudioSettingsPanel.tsx';
 import type { ActiveNavTab, MissionHistoryItem } from './types/hunter.ts';
 import type {
@@ -48,11 +51,13 @@ import type {
   ExecuteRequestPayload,
   ExecuteRequestResult,
   HttpMethod,
+  CollectionSummary,
 } from '../packages/shared/types.ts';
 import {
   getAudioSettings,
   saveAudioSettings,
   testSound,
+  playSound,
   type AudioSettings,
 } from './services/audioService.ts';
 import {
@@ -62,6 +67,11 @@ import {
   hasProtectedSecrets,
   REDACTED_MARKER,
 } from './services/historySecurityService.ts';
+import {
+  fetchCollections,
+  createCollectionApi,
+  createSavedRequestApi,
+} from './services/collectionsService.ts';
 
 const STORAGE_KEY_HISTORY = 'api_forge_hunter_history_v1';
 
@@ -99,12 +109,92 @@ export default function App() {
     return [];
   });
 
-  // Payload seleccionado para inyectar en el Request Builder al recargar desde historial
+  // Payload seleccionado para inyectar en el Request Builder al recargar desde historial o colección
   const [selectedPayloadForBuilder, setSelectedPayloadForBuilder] = useState<ExecuteRequestPayload | null>(null);
   // Misión seleccionada para inspección modal
   const [inspectingMission, setInspectingMission] = useState<MissionHistoryItem | null>(null);
   // Mensaje temporal de migración o auditoría manual
   const [securityAuditMessage, setSecurityAuditMessage] = useState<string | null>(null);
+
+  // Estado de Colecciones SQLite (Fase 1D)
+  const [collectionsCount, setCollectionsCount] = useState<number>(0);
+  const [currentBuilderPayload, setCurrentBuilderPayload] = useState<ExecuteRequestPayload | null>(null);
+  const [availableCollections, setAvailableCollections] = useState<CollectionSummary[]>([]);
+  const [isQuickSaveModalOpen, setIsQuickSaveModalOpen] = useState<boolean>(false);
+  const [quickSaveTargetColId, setQuickSaveTargetColId] = useState<string>('');
+  const [quickSaveIsNewCol, setQuickSaveIsNewCol] = useState<boolean>(false);
+  const [quickSaveNewColName, setQuickSaveNewColName] = useState<string>('');
+  const [quickSaveReqName, setQuickSaveReqName] = useState<string>('');
+  const [quickSavePayload, setQuickSavePayload] = useState<ExecuteRequestPayload | null>(null);
+
+  // Refrescar lista de colecciones para contador y modal
+  const refreshCollectionsCount = useCallback(async () => {
+    try {
+      const cols = await fetchCollections();
+      setAvailableCollections(cols);
+      setCollectionsCount(cols.length);
+      if (cols.length > 0 && !quickSaveTargetColId) {
+        setQuickSaveTargetColId(cols[0].id);
+      }
+    } catch {
+      // ignore
+    }
+  }, [quickSaveTargetColId]);
+
+  useEffect(() => {
+    refreshCollectionsCount();
+  }, [refreshCollectionsCount]);
+
+  // Manejar apertura de guardado rápido desde RequestBuilder
+  const handleOpenQuickSaveFromBuilder = (payload: ExecuteRequestPayload) => {
+    setQuickSavePayload(payload);
+    const defaultName = `Misión ${payload.method || 'GET'} - ${payload.url.split('/').filter(Boolean).pop() || 'Endpoint'}`;
+    setQuickSaveReqName(defaultName);
+    setIsQuickSaveModalOpen(true);
+    refreshCollectionsCount();
+  };
+
+  // Ejecutar guardado rápido en colección SQLite
+  const handleExecuteQuickSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickSavePayload || !quickSaveReqName.trim()) return;
+
+    try {
+      let targetId = quickSaveTargetColId;
+      if (quickSaveIsNewCol) {
+        if (!quickSaveNewColName.trim()) return;
+        const newCol = await createCollectionApi({ name: quickSaveNewColName.trim() });
+        targetId = newCol.id;
+      } else if (!targetId && availableCollections.length > 0) {
+        targetId = availableCollections[0].id;
+      }
+
+      if (!targetId) {
+        const defaultCol = await createCollectionApi({ name: 'Colección General' });
+        targetId = defaultCol.id;
+      }
+
+      await createSavedRequestApi(targetId, {
+        name: quickSaveReqName.trim(),
+        method: quickSavePayload.method || 'GET',
+        url: quickSavePayload.url,
+        headers: quickSavePayload.headers,
+        queryParams: quickSavePayload.queryParams,
+        body: quickSavePayload.body,
+      });
+
+      playSound('requestSuccess');
+      setSecurityAuditMessage(`Solicitud '${quickSaveReqName.trim()}' guardada exitosamente en la colección.`);
+      setTimeout(() => setSecurityAuditMessage(null), 4000);
+      setIsQuickSaveModalOpen(false);
+      setQuickSaveNewColName('');
+      setQuickSaveIsNewCol(false);
+      await refreshCollectionsCount();
+    } catch (err) {
+      playSound('requestError');
+      setHealthError(err instanceof Error ? err.message : 'Error al guardar la solicitud en la colección.');
+    }
+  };
 
   // Guardar historial seguro en almacenamiento local
   useEffect(() => {
@@ -309,6 +399,7 @@ export default function App() {
         onTabChange={setActiveTab}
         healthData={healthData}
         historyCount={history.length}
+        collectionsCount={collectionsCount}
         clientPingMs={clientPingMs}
         audioEnabled={audioSettings.enabled}
       />
@@ -323,6 +414,7 @@ export default function App() {
               <span>SISTEMA //</span>
               <span className="text-white font-bold tracking-wider">
                 {activeTab === 'builder' && 'REQUEST BUILDER CONSOLE'}
+                {activeTab === 'collections' && 'COLLECTIONS SYSTEM // SQLITE LIBRARY'}
                 {activeTab === 'monitor' && 'SYSTEM DIAGNOSTICS & STATUS'}
                 {activeTab === 'archive' && 'MISSION ARCHIVE & LOGS'}
                 {activeTab === 'settings' && 'SYSTEM SETTINGS // AUDIO'}
@@ -451,8 +543,23 @@ export default function App() {
               <RequestBuilder
                 initialPayload={selectedPayloadForBuilder}
                 onExecuted={handleRequestExecuted}
+                onSaveToCollection={handleOpenQuickSaveFromBuilder}
+                onPayloadChange={setCurrentBuilderPayload}
               />
             </div>
+          )}
+
+          {/* TAB: COLECCIONES (FASE 1D) */}
+          {activeTab === 'collections' && (
+            <CollectionsPanel
+              currentBuilderPayload={currentBuilderPayload}
+              onLoadIntoBuilder={(payload) => {
+                setSelectedPayloadForBuilder(payload);
+                setActiveTab('builder');
+              }}
+              onNavigateToBuilder={() => setActiveTab('builder')}
+              onCollectionsCountChange={setCollectionsCount}
+            />
           )}
 
           {/* TAB 2: MONITOR DEL SISTEMA (ESTADO Y OBSERVABILIDAD) */}
@@ -983,9 +1090,129 @@ export default function App() {
           </div>
         )}
 
+        {/* Modal de Guardado Rápido en Colección desde RequestBuilder */}
+        {isQuickSaveModalOpen && quickSavePayload && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-[#070b16] border border-cyan-500/40 rounded-xl p-5 w-full max-w-md space-y-4 shadow-[0_0_30px_rgba(6,182,212,0.25)] animate-fadeIn">
+              <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3">
+                <div className="flex items-center gap-2">
+                  <FolderArchive className="h-5 w-5 text-cyan-400" />
+                  <h3 className="text-sm font-bold text-white uppercase font-mono">
+                    GUARDAR EN COLECCIÓN
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setIsQuickSaveModalOpen(false)}
+                  className="text-slate-400 hover:text-white text-xs font-mono"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleExecuteQuickSave} className="space-y-4">
+                {/* Resumen de la Solicitud actual */}
+                <div className="p-3 rounded-lg bg-[#050811] border border-cyan-500/20 space-y-1 text-xs font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-cyan-400 uppercase">{quickSavePayload.method || 'GET'}</span>
+                    <span className="text-slate-300 truncate">{quickSavePayload.url}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Escudo de seguridad activo: los secretos se redactarán de forma transparente en SQLite.
+                  </div>
+                </div>
+
+                {/* Nombre de la solicitud guardada */}
+                <div>
+                  <label className="block text-[11px] font-mono text-cyan-400 uppercase mb-1">
+                    Nombre Descriptivo <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={quickSaveReqName}
+                    onChange={(e) => setQuickSaveReqName(e.target.value)}
+                    required
+                    autoFocus
+                    placeholder="Ej: Login de Usuario, Obtener Productos..."
+                    className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-cyan-500/30 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                  />
+                </div>
+
+                {/* Selección o Creación de Colección */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-mono text-cyan-400 uppercase">
+                      Colección Destino
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setQuickSaveIsNewCol(!quickSaveIsNewCol)}
+                      className="text-[10px] font-mono text-purple-400 hover:text-purple-300 underline"
+                    >
+                      {quickSaveIsNewCol ? 'Seleccionar existente' : '+ Crear nueva'}
+                    </button>
+                  </div>
+
+                  {quickSaveIsNewCol || availableCollections.length === 0 ? (
+                    <input
+                      type="text"
+                      value={quickSaveNewColName}
+                      onChange={(e) => setQuickSaveNewColName(e.target.value)}
+                      placeholder="Nombre de la nueva colección..."
+                      required
+                      className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-purple-500/40 text-xs font-mono text-white focus:outline-none focus:border-purple-400"
+                    />
+                  ) : (
+                    <select
+                      value={quickSaveTargetColId}
+                      onChange={(e) => setQuickSaveTargetColId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-cyan-500/30 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                    >
+                      {availableCollections.map((col) => (
+                        <option key={col.id} value={col.id}>
+                          {col.name} ({col.requestsCount} misiones)
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-cyan-500/20">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsQuickSaveModalOpen(false);
+                      setActiveTab('collections');
+                    }}
+                    className="text-xs font-mono text-slate-400 hover:text-cyan-300 transition"
+                  >
+                    Ver todas las colecciones &rarr;
+                  </button>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsQuickSaveModalOpen(false)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900/60 text-slate-300 font-mono text-xs hover:bg-slate-800 transition"
+                    >
+                      CANCELAR
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={!quickSaveReqName.trim()}
+                      className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono text-xs font-bold transition disabled:opacity-50"
+                    >
+                      GUARDAR
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* Pie de Página Holográfico */}
         <footer className="border-t border-cyan-500/20 bg-[#070b16] py-4 px-6 text-center text-xs font-mono text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div>API FORGE // SISTEMA HUNTER V1 &bull; FASE 1C (0 COP)</div>
+          <div>API FORGE // SISTEMA HUNTER V1 &bull; FASE 1D: COLLECTIONS SYSTEM</div>
           <div className="text-cyan-400/60">
             Node.js + Express + LibSQL/SQLite + Drizzle ORM + Vitest + React 19 + Tailwind + Web Audio API
           </div>

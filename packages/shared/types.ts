@@ -106,3 +106,66 @@ export interface ExecuteRequestPayload {
   maxResponseSizeBytes?: number;
   maxRedirects?: number;
 }
+
+/* ==========================================================================
+ * FASE 1D: CONTRATO DEL SISTEMA DE COLECCIONES (COLLECTIONS SYSTEM)
+ * ========================================================================== */
+
+export interface SavedRequestData {
+  id: string;
+  collectionId: string;
+  name: string;
+  method: HttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  queryParams?: Record<string, string | number | boolean>;
+  body?: string | object | null;
+  contentType?: string;
+  createdAt: string;
+  updatedAt: string;
+  hasProtectedSecrets?: boolean;
+}
+
+export interface CollectionSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  requestsCount: number;
+}
+
+export interface CollectionWithRequests extends CollectionSummary {
+  requests: SavedRequestData[];
+}
+
+export interface CreateCollectionPayload {
+  name: string;
+  description?: string;
+}
+
+export interface UpdateCollectionPayload {
+  name?: string;
+  description?: string;
+}
+
+export interface CreateSavedRequestPayload {
+  name: string;
+  method: HttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  queryParams?: Record<string, string | number | boolean>;
+  body?: string | object | null;
+  contentType?: string;
+}
+
+export interface UpdateSavedRequestPayload {
+  name?: string;
+  method?: HttpMethod;
+  url?: string;
+  headers?: Record<string, string>;
+  queryParams?: Record<string, string | number | boolean>;
+  body?: string | object | null;
+  contentType?: string;
+}
+
