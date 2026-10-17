@@ -169,3 +169,45 @@ export interface UpdateSavedRequestPayload {
   contentType?: string;
 }
 
+/* ==========================================================================
+ * FASE 1E: CONTRATO DEL SISTEMA DE VARIABLES Y ENTORNOS (ENVIRONMENTS)
+ * ========================================================================== */
+
+export interface EnvironmentVariable {
+  id: string;
+  name: string;
+  value: string;
+  isSecret?: boolean;
+}
+
+export interface EnvironmentData {
+  id: string;
+  name: string;
+  description?: string | null;
+  variables: EnvironmentVariable[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EnvironmentSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  variablesCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateEnvironmentPayload {
+  name: string;
+  description?: string;
+  variables?: EnvironmentVariable[];
+}
+
+export interface UpdateEnvironmentPayload {
+  name?: string;
+  description?: string;
+  variables?: EnvironmentVariable[];
+}
+
+

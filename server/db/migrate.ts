@@ -94,16 +94,28 @@ export async function runMigrations(): Promise<MigrationResult> {
       CREATE INDEX IF NOT EXISTS idx_saved_requests_collection_id ON saved_requests(collection_id);
     `);
 
-    // 9. Verificar que las tablas existen
+    // 9. Crear tabla environments (Fase 1E)
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        variables TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
+    // 10. Verificar que las tablas existen
     const tablesCheck = await client.execute(`
       SELECT name FROM sqlite_master 
-      WHERE type='table' AND name IN ('projects', 'api_endpoints', 'health_audit_logs', 'collections', 'saved_requests')
+      WHERE type='table' AND name IN ('projects', 'api_endpoints', 'health_audit_logs', 'collections', 'saved_requests', 'environments')
       ORDER BY name ASC;
     `);
 
     const appliedTables = tablesCheck.rows.map((r) => String(r[0]));
 
-    // 10. Verificar estado de foreign keys
+    // 11. Verificar estado de foreign keys
     const fkCheck = await client.execute('PRAGMA foreign_keys;');
     const foreignKeysActive = fkCheck.rows.length > 0 && Number(fkCheck.rows[0][0]) === 1;
 

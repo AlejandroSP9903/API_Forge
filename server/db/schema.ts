@@ -91,3 +91,23 @@ export type NewCollection = typeof collections.$inferInsert;
 export type SavedRequest = typeof savedRequests.$inferSelect;
 export type NewSavedRequest = typeof savedRequests.$inferInsert;
 
+/* ==========================================================================
+ * FASE 1E: TABLA DE ENTORNOS Y VARIABLES (ENVIRONMENTS)
+ * ========================================================================== */
+
+/**
+ * Tabla de Entornos de Ejecución
+ */
+export const environments = sqliteTable('environments', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  variables: text('variables'), // JSON serializado de EnvironmentVariable[]
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+});
+
+export type Environment = typeof environments.$inferSelect;
+export type NewEnvironment = typeof environments.$inferInsert;
+
+

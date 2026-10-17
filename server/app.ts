@@ -7,6 +7,7 @@ import express, { type Express } from 'express';
 import { healthRouter } from './routes/health.ts';
 import { requestsRouter } from './routes/requests.ts';
 import { collectionsRouter } from './routes/collections.ts';
+import { environmentsRouter } from './routes/environments.ts';
 import { errorHandler } from './middleware/errorHandler.ts';
 
 export function createApp(): Express {
@@ -19,6 +20,7 @@ export function createApp(): Express {
   app.use('/api', healthRouter);
   app.use('/api/requests', requestsRouter);
   app.use('/api/collections', collectionsRouter);
+  app.use('/api/environments', environmentsRouter);
 
   // Manejador centralizado de errores
   app.use(errorHandler);

@@ -40,10 +40,12 @@ import {
   Info,
   FolderArchive,
   FolderPlus,
+  Globe,
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { RequestBuilder } from './components/RequestBuilder.tsx';
 import { CollectionsPanel } from './components/CollectionsPanel.tsx';
+import { EnvironmentsPanel } from './components/EnvironmentsPanel.tsx';
 import { AudioSettingsPanel } from './components/AudioSettingsPanel.tsx';
 import type { ActiveNavTab, MissionHistoryItem } from './types/hunter.ts';
 import type {
@@ -52,6 +54,8 @@ import type {
   ExecuteRequestResult,
   HttpMethod,
   CollectionSummary,
+  EnvironmentSummary,
+  EnvironmentData,
 } from '../packages/shared/types.ts';
 import {
   getAudioSettings,
@@ -72,6 +76,12 @@ import {
   createCollectionApi,
   createSavedRequestApi,
 } from './services/collectionsService.ts';
+import {
+  fetchEnvironments,
+  fetchEnvironmentById,
+  getActiveEnvironmentId,
+  setActiveEnvironmentId,
+} from './services/environmentService.ts';
 
 const STORAGE_KEY_HISTORY = 'api_forge_hunter_history_v1';
 
@@ -126,6 +136,59 @@ export default function App() {
   const [quickSaveNewColName, setQuickSaveNewColName] = useState<string>('');
   const [quickSaveReqName, setQuickSaveReqName] = useState<string>('');
   const [quickSavePayload, setQuickSavePayload] = useState<ExecuteRequestPayload | null>(null);
+
+  // Estado de Entornos y Variables (Fase 1E)
+  const [environmentsCount, setEnvironmentsCount] = useState<number>(0);
+  const [allEnvironments, setAllEnvironments] = useState<EnvironmentSummary[]>([]);
+  const [activeEnvironmentId, setActiveEnvironmentIdState] = useState<string | null>(() => getActiveEnvironmentId());
+  const [activeEnvironmentData, setActiveEnvironmentData] = useState<EnvironmentData | null>(null);
+
+  // Sincronizar lista de entornos y datos del entorno activo
+  const refreshEnvironments = useCallback(async () => {
+    try {
+      const list = await fetchEnvironments();
+      setAllEnvironments(list);
+      setEnvironmentsCount(list.length);
+
+      const targetId = activeEnvironmentId && list.some((e) => e.id === activeEnvironmentId)
+        ? activeEnvironmentId
+        : null;
+
+      if (targetId) {
+        const full = await fetchEnvironmentById(targetId);
+        setActiveEnvironmentData(full);
+      } else {
+        setActiveEnvironmentData(null);
+      }
+    } catch {
+      // ignore
+    }
+  }, [activeEnvironmentId]);
+
+  useEffect(() => {
+    refreshEnvironments();
+  }, [refreshEnvironments]);
+
+  // Manejar cambio de entorno activo
+  const handleActiveEnvironmentChange = async (id: string | null, data?: EnvironmentData | null) => {
+    setActiveEnvironmentIdState(id);
+    setActiveEnvironmentId(id);
+
+    if (id) {
+      if (data) {
+        setActiveEnvironmentData(data);
+      } else {
+        try {
+          const full = await fetchEnvironmentById(id);
+          setActiveEnvironmentData(full);
+        } catch {
+          setActiveEnvironmentData(null);
+        }
+      }
+    } else {
+      setActiveEnvironmentData(null);
+    }
+  };
 
   // Refrescar lista de colecciones para contador y modal
   const refreshCollectionsCount = useCallback(async () => {
@@ -400,6 +463,7 @@ export default function App() {
         healthData={healthData}
         historyCount={history.length}
         collectionsCount={collectionsCount}
+        environmentsCount={environmentsCount}
         clientPingMs={clientPingMs}
         audioEnabled={audioSettings.enabled}
       />
@@ -415,6 +479,7 @@ export default function App() {
               <span className="text-white font-bold tracking-wider">
                 {activeTab === 'builder' && 'REQUEST BUILDER CONSOLE'}
                 {activeTab === 'collections' && 'COLLECTIONS SYSTEM // SQLITE LIBRARY'}
+                {activeTab === 'environments' && 'ENVIRONMENTS & VARIABLES // SYSTEM ENGINE'}
                 {activeTab === 'monitor' && 'SYSTEM DIAGNOSTICS & STATUS'}
                 {activeTab === 'archive' && 'MISSION ARCHIVE & LOGS'}
                 {activeTab === 'settings' && 'SYSTEM SETTINGS // AUDIO'}
@@ -545,6 +610,10 @@ export default function App() {
                 onExecuted={handleRequestExecuted}
                 onSaveToCollection={handleOpenQuickSaveFromBuilder}
                 onPayloadChange={setCurrentBuilderPayload}
+                activeEnvironment={activeEnvironmentData}
+                allEnvironments={allEnvironments}
+                onSelectActiveEnvironment={(id) => handleActiveEnvironmentChange(id)}
+                onOpenEnvironmentsTab={() => setActiveTab('environments')}
               />
             </div>
           )}
@@ -559,6 +628,15 @@ export default function App() {
               }}
               onNavigateToBuilder={() => setActiveTab('builder')}
               onCollectionsCountChange={setCollectionsCount}
+            />
+          )}
+
+          {/* TAB: ENTORNOS Y VARIABLES (FASE 1E) */}
+          {activeTab === 'environments' && (
+            <EnvironmentsPanel
+              activeEnvironmentId={activeEnvironmentId}
+              onActiveEnvironmentChange={handleActiveEnvironmentChange}
+              onEnvironmentsCountChange={setEnvironmentsCount}
             />
           )}
 

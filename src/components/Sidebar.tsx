@@ -16,6 +16,7 @@ import {
   Layers,
   Sliders,
   FolderArchive,
+  Globe,
 } from 'lucide-react';
 import type { ActiveNavTab } from '../types/hunter.ts';
 import type { HealthCheckResponse } from '../../packages/shared/types.ts';
@@ -26,6 +27,7 @@ interface SidebarProps {
   healthData: HealthCheckResponse | null;
   historyCount: number;
   collectionsCount?: number;
+  environmentsCount?: number;
   clientPingMs: number | null;
   audioEnabled?: boolean;
 }
@@ -36,6 +38,7 @@ export function Sidebar({
   healthData,
   historyCount,
   collectionsCount = 0,
+  environmentsCount = 0,
   clientPingMs,
   audioEnabled,
 }: SidebarProps) {
@@ -81,7 +84,7 @@ export function Sidebar({
           <div className="text-right">
             <div className="text-[10px] font-mono text-cyan-400/70 uppercase">Nivel Sistema</div>
             <div className="text-xs font-extrabold text-purple-400 font-mono tracking-wider">
-              FASE 1D
+              FASE 1E
             </div>
           </div>
         </div>
@@ -128,6 +131,28 @@ export function Sidebar({
             </span>
           ) : (
             <span className="text-[10px] font-mono text-cyan-400/60">[SQLITE]</span>
+          )}
+        </button>
+
+        {/* 3. Environments & Variables (Fase 1E) */}
+        <button
+          onClick={() => onTabChange('environments')}
+          className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${
+            activeTab === 'environments'
+              ? 'bg-gradient-to-r from-cyan-950/60 to-indigo-950/40 border border-cyan-500/40 text-cyan-300 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            <Globe className={`h-4 w-4 ${activeTab === 'environments' ? 'text-cyan-400' : 'text-slate-500 group-hover:text-cyan-400'}`} />
+            <span>ENTORNOS</span>
+          </div>
+          {environmentsCount > 0 ? (
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+              {environmentsCount}
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono text-cyan-400/60">[VARS]</span>
           )}
         </button>
 

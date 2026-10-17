@@ -3,7 +3,7 @@
  * Interfaz de composición y ejecución de solicitudes HTTP con estética de Solo Leveling.
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Send,
   Square,
@@ -16,6 +16,7 @@ import {
   Sliders,
   AlertTriangle,
   ShieldAlert,
+  Shield,
   Clock,
   Layers,
   FileText,
@@ -25,21 +26,34 @@ import {
   RotateCw,
   Crosshair,
   FolderArchive,
+  Globe,
+  ExternalLink,
 } from 'lucide-react';
 import type {
   HttpMethod,
   ExecuteRequestPayload,
   ExecuteRequestResult,
+  EnvironmentData,
+  EnvironmentSummary,
 } from '../../packages/shared/types.ts';
 import type { KeyValueItem } from '../types/hunter.ts';
 import { playSound } from '../services/audioService.ts';
-import { hasProtectedSecrets, sanitizeText } from '../services/historySecurityService.ts';
+import { hasProtectedSecrets, sanitizeText, isSensitiveHeader } from '../services/historySecurityService.ts';
+import {
+  interpolateRequest,
+  interpolateString,
+  VARIABLE_REGEX,
+} from '../services/environmentService.ts';
 
 interface RequestBuilderProps {
   initialPayload?: ExecuteRequestPayload | null;
   onExecuted?: (payload: ExecuteRequestPayload, result: ExecuteRequestResult) => void;
   onSaveToCollection?: (payload: ExecuteRequestPayload) => void;
   onPayloadChange?: (payload: ExecuteRequestPayload) => void;
+  activeEnvironment?: EnvironmentData | null;
+  allEnvironments?: EnvironmentSummary[];
+  onSelectActiveEnvironment?: (envId: string | null) => void;
+  onOpenEnvironmentsTab?: () => void;
 }
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -61,6 +75,13 @@ const MISSION_PRESETS = [
     description: 'API REST pública con respuesta JSON estándar',
   },
   {
+    name: 'GET con Parámetros (?userId=1&_limit=5)',
+    method: 'GET' as HttpMethod,
+    url: 'https://jsonplaceholder.typicode.com/posts',
+    queryParams: { userId: '1', _limit: '5' } as Record<string, string>,
+    description: 'Prueba la adición de parámetros tras ? en la URL',
+  },
+  {
     name: 'POST con JSON',
     method: 'POST' as HttpMethod,
     url: 'https://jsonplaceholder.typicode.com/posts',
@@ -79,6 +100,12 @@ const MISSION_PRESETS = [
     url: 'http://localhost:3000/api/health',
     description: 'Prueba el escudo SSRF contra loopback interno',
   },
+  {
+    name: 'GET con {{BASE_URL}}',
+    method: 'GET' as HttpMethod,
+    url: '{{BASE_URL}}/posts/1',
+    description: 'Prueba la interpolación de variables del entorno activo',
+  },
 ];
 
 export function RequestBuilder({
@@ -86,6 +113,10 @@ export function RequestBuilder({
   onExecuted,
   onSaveToCollection,
   onPayloadChange,
+  activeEnvironment,
+  allEnvironments,
+  onSelectActiveEnvironment,
+  onOpenEnvironmentsTab,
 }: RequestBuilderProps) {
   // Estado de configuración de solicitud
   const [method, setMethod] = useState<HttpMethod>('GET');
@@ -122,6 +153,7 @@ export function RequestBuilder({
     }
 
     let parsedBody: string | object | null = null;
+    // Métodos GET nunca deben enviar cuerpo de solicitud
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && bodyText.trim()) {
       try {
         parsedBody = JSON.parse(bodyText);
@@ -140,6 +172,47 @@ export function RequestBuilder({
       maxRedirects,
     };
   }, [url, method, queryParams, headers, bodyText, timeoutMs, maxRedirects]);
+
+  // Cálculo de vista previa de URL resultante en tiempo real (Base + Query Params + Interpolación)
+  const effectiveUrlPreview = useMemo(() => {
+    const cleanBase = url.trim();
+    const enabledParams = queryParams.filter((p) => p.enabled && p.key.trim());
+    const hasParams = enabledParams.length > 0;
+
+    if (!cleanBase) {
+      return { rawUrlWithParams: '', resolvedUrlWithParams: undefined, hasParams: false };
+    }
+
+    let rawUrlWithParams = cleanBase;
+    if (hasParams) {
+      const separator = cleanBase.includes('?') ? '&' : '?';
+      const queryString = enabledParams
+        .map((p) => `${p.key.trim()}=${p.value}`)
+        .join('&');
+      rawUrlWithParams = `${cleanBase}${separator}${queryString}`;
+    }
+
+    let resolvedUrlWithParams: string | undefined = undefined;
+    if (activeEnvironment?.variables && activeEnvironment.variables.length > 0) {
+      try {
+        const varsMap = new Map<string, string>();
+        for (const v of activeEnvironment.variables) {
+          if (v.name?.trim()) {
+            varsMap.set(v.name.trim(), v.value ?? '');
+          }
+        }
+        resolvedUrlWithParams = interpolateString(rawUrlWithParams, varsMap);
+      } catch {
+        resolvedUrlWithParams = undefined;
+      }
+    }
+
+    return {
+      rawUrlWithParams,
+      resolvedUrlWithParams,
+      hasParams,
+    };
+  }, [url, queryParams, activeEnvironment]);
 
   // Sincronizar hacia afuera el payload actual cuando cambia
   useEffect(() => {
@@ -253,12 +326,34 @@ export function RequestBuilder({
       }
     }
 
-    // 3. Procesar cuerpo si el método lo permite
+    // 3. Procesar cuerpo si el método lo permite (GET nunca lleva cuerpo)
     let parsedBody: string | object | null = null;
+    const varPattern = /\{\{\s*([a-zA-Z0-9_\-\.]+)\s*\}\}/;
+
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && bodyText.trim()) {
       try {
         parsedBody = JSON.parse(bodyText);
-      } catch {
+      } catch (jsonErr) {
+        // Si no contiene variables de entorno {{...}}, rechazar inmediatamente por JSON inválido
+        if (!varPattern.test(bodyText)) {
+          playSound('requestError');
+          const errResult: ExecuteRequestResult = {
+            success: false,
+            error: {
+              code: 'INVALID_REQUEST',
+              message: `El cuerpo de la solicitud no es un JSON válido. Revisa la sintaxis en la pestaña 'CUERPO (JSON)': ${jsonErr instanceof Error ? jsonErr.message : 'Error de formato JSON'}`,
+            },
+            timing: {
+              durationMs: 0,
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            },
+          };
+          setExecutionResult(errResult);
+          setLoading(false);
+          return;
+        }
+        // Si contiene variables, se conservará como texto para ser interpolado en el paso 3.5
         parsedBody = bodyText;
       }
     }
@@ -268,10 +363,102 @@ export function RequestBuilder({
       method,
       queryParams: Object.keys(cleanParams).length > 0 ? cleanParams : undefined,
       headers: Object.keys(cleanHeaders).length > 0 ? cleanHeaders : undefined,
-      body: parsedBody,
+      body: method === 'GET' ? null : parsedBody,
       timeoutMs,
       maxRedirects,
     };
+
+    // 3.5. Detección e interpolación de variables {{VARIABLE}} (Fase 1E)
+    let payloadToSend: ExecuteRequestPayload = payload;
+    const hasVarInUrl = varPattern.test(url);
+    const hasVarInParams = queryParams.some(
+      (p) => p.enabled && (varPattern.test(p.key) || varPattern.test(p.value))
+    );
+    const hasVarInHeaders = headers.some(
+      (h) => h.enabled && (varPattern.test(h.key) || varPattern.test(h.value))
+    );
+    const hasVarInBody = varPattern.test(bodyText);
+    const hasVariables = hasVarInUrl || hasVarInParams || hasVarInHeaders || hasVarInBody;
+
+    if (hasVariables) {
+      if (!activeEnvironment) {
+        playSound('requestError');
+        const errResult: ExecuteRequestResult = {
+          success: false,
+          error: {
+            code: 'INVALID_REQUEST',
+            message:
+              'La solicitud contiene variables sin resolver (ej: {{...}}), pero no hay ningún entorno activo seleccionado. Selecciona un entorno en el selector superior antes de ejecutar.',
+          },
+          timing: {
+            durationMs: 0,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          },
+        };
+        setExecutionResult(errResult);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const { interpolatedPayload, secretVarsUsed } = interpolateRequest(
+          payload,
+          activeEnvironment.variables
+        );
+        payloadToSend = interpolatedPayload;
+
+        // Validar que el cuerpo resultante tras interpolar sea JSON válido si el método lo requiere
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && payloadToSend.body) {
+          if (typeof payloadToSend.body === 'string') {
+            try {
+              payloadToSend.body = JSON.parse(payloadToSend.body);
+            } catch (afterInterpErr) {
+              playSound('requestError');
+              const errResult: ExecuteRequestResult = {
+                success: false,
+                error: {
+                  code: 'INVALID_REQUEST',
+                  message: `El cuerpo de la solicitud no es un JSON válido tras resolver las variables. Revisa la sintaxis en la pestaña 'CUERPO (JSON)': ${afterInterpErr instanceof Error ? afterInterpErr.message : 'Error de formato JSON'}`,
+                },
+                timing: {
+                  durationMs: 0,
+                  startedAt: new Date().toISOString(),
+                  completedAt: new Date().toISOString(),
+                },
+              };
+              setExecutionResult(errResult);
+              setLoading(false);
+              return;
+            }
+          }
+        }
+
+        if (secretVarsUsed.length > 0) {
+          setHasProtectedValuesWarning(true);
+        }
+      } catch (interpErr) {
+        playSound('requestError');
+        const errResult: ExecuteRequestResult = {
+          success: false,
+          error: {
+            code: 'INVALID_REQUEST',
+            message:
+              interpErr instanceof Error
+                ? interpErr.message
+                : 'Error al resolver las variables del entorno activo.',
+          },
+          timing: {
+            durationMs: 0,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+          },
+        };
+        setExecutionResult(errResult);
+        setLoading(false);
+        return;
+      }
+    }
 
     // 4. Instanciar controlador de cancelación y reproducir inicio de solicitud
     const controller = new AbortController();
@@ -284,7 +471,7 @@ export function RequestBuilder({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payloadToSend),
         signal: controller.signal,
       });
 
@@ -354,12 +541,45 @@ export function RequestBuilder({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const insertQuickHeader = (key: string, value: string) => {
+    setHeaders((prev) => {
+      const existing = prev.find((h) => h.key.trim().toLowerCase() === key.toLowerCase());
+      if (existing) {
+        return prev.map((h) =>
+          h.id === existing.id ? { ...h, key, value, enabled: true } : h
+        );
+      }
+      const existingEmpty = prev.find((h) => !h.key.trim());
+      if (existingEmpty) {
+        return prev.map((h) =>
+          h.id === existingEmpty.id ? { ...h, key, value, enabled: true } : h
+        );
+      }
+      return [...prev, { id: String(Date.now()), key, value, enabled: true }];
+    });
+  };
+
   const applyPreset = (preset: typeof MISSION_PRESETS[0]) => {
     setMethod(preset.method);
     setUrl(preset.url);
     if (preset.body) {
       setBodyText(preset.body);
       setActiveRequestTab('body');
+    } else {
+      setBodyText('');
+    }
+
+    if ('queryParams' in preset && preset.queryParams) {
+      const qList = Object.entries(preset.queryParams).map(([k, v], i) => ({
+        id: String(i + 1),
+        key: k,
+        value: String(v),
+        enabled: true,
+      }));
+      setQueryParams(qList.length > 0 ? qList : [{ id: '1', key: '', value: '', enabled: true }]);
+      setActiveRequestTab('params');
+    } else {
+      setQueryParams([{ id: '1', key: '', value: '', enabled: true }]);
     }
   };
 
@@ -377,18 +597,52 @@ export function RequestBuilder({
           </h2>
         </div>
 
-        {/* Acceso rápido a misiones de prueba */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          <span className="text-[10px] font-mono text-slate-400 uppercase shrink-0">Preajustes:</span>
-          {MISSION_PRESETS.map((preset) => (
-            <button
-              key={preset.name}
-              onClick={() => applyPreset(preset)}
-              className="px-2.5 py-1 rounded text-[11px] font-mono bg-slate-900/80 hover:bg-cyan-950/60 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 transition whitespace-nowrap"
+        {/* Selector de Entorno Activo y Acceso rápido a misiones de prueba */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Selector de Entorno Activo */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#070b16] border border-cyan-500/30 text-xs font-mono shadow-[0_0_10px_rgba(6,182,212,0.1)]">
+            <Globe className="h-3.5 w-3.5 text-cyan-400" />
+            <span className="text-[10px] text-cyan-400/80 font-bold uppercase hidden sm:inline">ENTORNO:</span>
+            <select
+              value={activeEnvironment?.id || ''}
+              onChange={(e) => onSelectActiveEnvironment?.(e.target.value || null)}
+              className="bg-transparent text-cyan-300 font-bold text-xs focus:outline-none cursor-pointer pr-1"
+              title="Seleccionar Entorno Activo para Interpolación {{VARIABLE}}"
             >
-              {preset.name}
-            </button>
-          ))}
+              <option value="" className="bg-[#070b16] text-slate-400">
+                -- Sin Entorno (Inactivo) --
+              </option>
+              {allEnvironments?.map((env) => (
+                <option key={env.id} value={env.id} className="bg-[#070b16] text-slate-100">
+                  {env.name} ({env.variablesCount} vars)
+                </option>
+              ))}
+            </select>
+            {onOpenEnvironmentsTab && (
+              <button
+                type="button"
+                onClick={onOpenEnvironmentsTab}
+                className="text-[10px] text-cyan-400 hover:text-cyan-200 underline font-bold"
+                title="Configurar variables de entorno"
+              >
+                [CONFIG]
+              </button>
+            )}
+          </div>
+
+          {/* Preajustes */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+            <span className="text-[10px] font-mono text-slate-400 uppercase shrink-0">Preajustes:</span>
+            {MISSION_PRESETS.map((preset) => (
+              <button
+                key={preset.name}
+                onClick={() => applyPreset(preset)}
+                className="px-2.5 py-1 rounded text-[11px] font-mono bg-slate-900/80 hover:bg-cyan-950/60 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 transition whitespace-nowrap"
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -416,83 +670,130 @@ export function RequestBuilder({
       )}
 
       {/* Barra Principal de Entrada (Método + URL + Botón Disparo) */}
-      <div className="p-3 sm:p-4 rounded-xl holo-panel space-y-3 sm:space-y-0 sm:flex sm:items-center sm:gap-3">
-        {/* Selector de Método HTTP */}
-        <div className="relative shrink-0">
-          <select
-            value={method}
-            onChange={(e) => setMethod(e.target.value as HttpMethod)}
-            disabled={loading}
-            className={`w-full sm:w-auto px-3.5 py-2.5 rounded-lg font-mono text-xs font-black uppercase tracking-wider border transition appearance-none cursor-pointer pr-8 ${METHOD_COLORS[method].bg} ${METHOD_COLORS[method].text} ${METHOD_COLORS[method].border}`}
-          >
-            {METHODS.map((m) => (
-              <option key={m} value={m} className="bg-[#070b16] text-slate-100">
-                {m}
-              </option>
-            ))}
-          </select>
-          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-cyan-400">
-            ▼
+      <div className="p-3 sm:p-4 rounded-xl holo-panel space-y-3">
+        <div className="sm:flex sm:items-center sm:gap-3 space-y-3 sm:space-y-0">
+          {/* Selector de Método HTTP */}
+          <div className="relative shrink-0">
+            <select
+              value={method}
+              onChange={(e) => setMethod(e.target.value as HttpMethod)}
+              disabled={loading}
+              className={`w-full sm:w-auto px-3.5 py-2.5 rounded-lg font-mono text-xs font-black uppercase tracking-wider border transition appearance-none cursor-pointer pr-8 ${METHOD_COLORS[method].bg} ${METHOD_COLORS[method].text} ${METHOD_COLORS[method].border}`}
+            >
+              {METHODS.map((m) => (
+                <option key={m} value={m} className="bg-[#070b16] text-slate-100">
+                  {m}
+                </option>
+              ))}
+            </select>
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-cyan-400">
+              ▼
+            </div>
+          </div>
+
+          {/* Entrada de URL */}
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !loading && handleExecute()}
+              placeholder="https://api.destino.com/v1/recurso"
+              disabled={loading}
+              className="w-full px-4 py-2.5 rounded-lg bg-[#050811]/90 border border-cyan-500/20 focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/50 text-xs sm:text-sm font-mono text-cyan-100 placeholder:text-slate-600 transition"
+            />
+          </div>
+
+          {/* Botón de Ejecutar o Cancelar */}
+          <div className="shrink-0 flex items-center gap-2">
+            {loading ? (
+              <button
+                onClick={handleCancel}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/50 text-rose-300 font-mono text-xs font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(244,63,94,0.3)] cursor-pointer"
+              >
+                <Square className="h-3.5 w-3.5 fill-rose-400" />
+                <span>CANCELAR</span>
+              </button>
+            ) : (
+              <>
+                {onSaveToCollection && (
+                  <button
+                    type="button"
+                    onClick={() => onSaveToCollection(buildCurrentPayload())}
+                    disabled={!url.trim()}
+                    className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(6,182,212,0.15)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Guardar solicitud en una colección SQLite"
+                  >
+                    <FolderArchive className="h-3.5 w-3.5" />
+                    <span>GUARDAR</span>
+                  </button>
+                )}
+                <button
+                  onClick={handleExecute}
+                  disabled={!url.trim()}
+                  className="w-full sm:w-auto px-6 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 border border-cyan-400/50 text-slate-950 font-mono text-xs font-black tracking-wider transition flex items-center justify-center gap-2 cyan-glow cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Send className="h-3.5 w-3.5 fill-slate-950" />
+                  <span>DISPARAR MISIÓN</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Entrada de URL */}
-        <div className="flex-1 relative">
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && !loading && handleExecute()}
-            placeholder="https://api.destino.com/v1/recurso"
-            disabled={loading}
-            className="w-full px-4 py-2.5 rounded-lg bg-[#050811]/90 border border-cyan-500/20 focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-400/50 text-xs sm:text-sm font-mono text-cyan-100 placeholder:text-slate-600 transition"
-          />
-        </div>
+        {/* Vista Previa de URL Resultante (URL Base + Parámetros tras ? + Variables) */}
+        <div className="pt-2 border-t border-cyan-500/10 space-y-1.5 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-cyan-400 text-[10px] font-bold uppercase tracking-wider">
+              <Globe className="h-3 w-3 text-cyan-400" />
+              <span>URL EFECTIVA RESULTANTE:</span>
+            </div>
+            {effectiveUrlPreview.hasParams && (
+              <span className="text-[10px] text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
+                +{queryParams.filter((p) => p.enabled && p.key.trim()).length} parámetro(s) agregados tras '?'
+              </span>
+            )}
+          </div>
 
-        {/* Botón de Ejecutar o Cancelar */}
-        <div className="shrink-0 flex items-center gap-2">
-          {loading ? (
-            <button
-              onClick={handleCancel}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/50 text-rose-300 font-mono text-xs font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(244,63,94,0.3)] cursor-pointer"
-            >
-              <Square className="h-3.5 w-3.5 fill-rose-400" />
-              <span>CANCELAR</span>
-            </button>
-          ) : (
-            <>
-              {onSaveToCollection && (
-                <button
-                  type="button"
-                  onClick={() => onSaveToCollection(buildCurrentPayload())}
-                  disabled={!url.trim()}
-                  className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-bold tracking-wider transition flex items-center justify-center gap-2 shadow-[0_0_10px_rgba(6,182,212,0.15)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Guardar solicitud en una colección SQLite"
-                >
-                  <FolderArchive className="h-3.5 w-3.5" />
-                  <span>GUARDAR</span>
-                </button>
+          <div className="p-2 rounded bg-[#03060d] border border-cyan-500/20 text-slate-200 text-xs font-mono break-all select-all flex items-center justify-between gap-2">
+            <span>
+              {effectiveUrlPreview.rawUrlWithParams || (
+                <span className="text-slate-600">Introduce una URL de destino...</span>
               )}
+            </span>
+            {effectiveUrlPreview.rawUrlWithParams && (
               <button
-                onClick={handleExecute}
-                disabled={!url.trim()}
-                className="w-full sm:w-auto px-6 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 border border-cyan-400/50 text-slate-950 font-mono text-xs font-black tracking-wider transition flex items-center justify-center gap-2 cyan-glow cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
+                onClick={() => copyToClipboard(effectiveUrlPreview.rawUrlWithParams)}
+                className="text-slate-400 hover:text-cyan-300 shrink-0 p-1"
+                title="Copiar URL efectiva"
               >
-                <Send className="h-3.5 w-3.5 fill-slate-950" />
-                <span>DISPARAR MISIÓN</span>
+                <Copy className="h-3.5 w-3.5" />
               </button>
-            </>
-          )}
+            )}
+          </div>
+
+          {/* Si hay entorno activo y variables en la URL, mostrar la versión resuelta */}
+          {effectiveUrlPreview.resolvedUrlWithParams &&
+            effectiveUrlPreview.resolvedUrlWithParams !== effectiveUrlPreview.rawUrlWithParams && (
+              <div className="p-2 rounded bg-emerald-950/20 border border-emerald-500/30 text-[11px] font-mono text-emerald-300 flex items-center gap-2 break-all select-all">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                <span className="text-[10px] font-bold uppercase text-emerald-400/80 shrink-0">
+                  Resuelta con {activeEnvironment?.name}:
+                </span>
+                <span className="font-bold">{effectiveUrlPreview.resolvedUrlWithParams}</span>
+              </div>
+            )}
         </div>
       </div>
 
       {/* Panel de Configuración de la Solicitud (Pestañas: Params, Headers, Body, Config) */}
       <div className="rounded-xl holo-panel overflow-hidden">
         {/* Cabecera de Pestañas */}
-        <div className="flex border-b border-cyan-500/20 bg-[#070b16]/70 px-4">
+        <div className="flex border-b border-cyan-500/20 bg-[#070b16]/70 px-4 overflow-x-auto">
           <button
             onClick={() => setActiveRequestTab('params')}
-            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative ${
+            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
               activeRequestTab === 'params'
                 ? 'text-cyan-300 border-b-2 border-cyan-400 -mb-px'
                 : 'text-slate-400 hover:text-slate-200'
@@ -508,7 +809,7 @@ export function RequestBuilder({
 
           <button
             onClick={() => setActiveRequestTab('headers')}
-            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative ${
+            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
               activeRequestTab === 'headers'
                 ? 'text-cyan-300 border-b-2 border-cyan-400 -mb-px'
                 : 'text-slate-400 hover:text-slate-200'
@@ -524,21 +825,24 @@ export function RequestBuilder({
 
           <button
             onClick={() => setActiveRequestTab('body')}
-            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative ${
+            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
               activeRequestTab === 'body'
                 ? 'text-cyan-300 border-b-2 border-cyan-400 -mb-px'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <span>CUERPO (JSON)</span>
-            {bodyText.trim() && (
+            {method !== 'GET' && bodyText.trim() && (
               <span className="h-2 w-2 rounded-full bg-cyan-400" />
+            )}
+            {method === 'GET' && (
+              <span className="text-[10px] text-slate-500 uppercase font-normal">(No aplica)</span>
             )}
           </button>
 
           <button
             onClick={() => setActiveRequestTab('config')}
-            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative ${
+            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
               activeRequestTab === 'config'
                 ? 'text-cyan-300 border-b-2 border-cyan-400 -mb-px'
                 : 'text-slate-400 hover:text-slate-200'
@@ -552,8 +856,21 @@ export function RequestBuilder({
         {/* Contenido de Pestaña: Parámetros */}
         {activeRequestTab === 'params' && (
           <div className="p-4 space-y-3">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span className="font-mono text-[11px] text-cyan-400/80">// Query Parameters</span>
+            {/* Banner explicativo de Parámetros de Consulta */}
+            <div className="p-3 rounded-lg bg-[#070b16] border border-cyan-500/20 text-xs font-mono space-y-1">
+              <div className="flex items-center justify-between text-[11px] text-cyan-300 font-bold">
+                <span>// Parámetros de Consulta (Query Params)</span>
+                <span className="text-[10px] text-slate-400 font-normal">Se agregan tras '?' en la URL</span>
+              </div>
+              <p className="text-slate-400 text-[11px] leading-relaxed">
+                Los parámetros representan datos que se adjuntan a la URL tras el carácter <code className="text-cyan-300 font-bold">?</code> y se concatenan con <code className="text-cyan-300 font-bold">&</code> (ej: <code className="text-cyan-300 font-bold">?userId=1&_limit=5</code>). Son independientes de los encabezados HTTP y admiten variables <code className="text-cyan-300 font-bold">{'{{VARIABLE}}'}</code>.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-slate-400 pt-1">
+              <span className="font-mono text-[11px] text-cyan-400/80">
+                Pares Clave-Valor ({queryParams.filter((p) => p.enabled && p.key.trim()).length} activos)
+              </span>
               <button
                 onClick={addParam}
                 className="px-2.5 py-1 rounded text-xs font-mono bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/30 text-cyan-300 flex items-center gap-1 transition"
@@ -570,20 +887,21 @@ export function RequestBuilder({
                     type="checkbox"
                     checked={p.enabled}
                     onChange={(e) => updateParam(p.id, 'enabled', e.target.checked)}
-                    className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500 h-4 w-4"
+                    title={p.enabled ? 'Parámetro habilitado' : 'Parámetro deshabilitado'}
+                    className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500 h-4 w-4 cursor-pointer"
                   />
                   <input
                     type="text"
                     value={p.key}
                     onChange={(e) => updateParam(p.id, 'key', e.target.value)}
-                    placeholder="Clave (ej. page)"
+                    placeholder="Clave (ej. userId)"
                     className="flex-1 px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
                   />
                   <input
                     type="text"
                     value={p.value}
                     onChange={(e) => updateParam(p.id, 'value', e.target.value)}
-                    placeholder="Valor (ej. 2)"
+                    placeholder="Valor (ej. 1 o {{POST_ID}})"
                     className="flex-1 px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
                   />
                   <button
@@ -602,57 +920,97 @@ export function RequestBuilder({
         {/* Contenido de Pestaña: Encabezados */}
         {activeRequestTab === 'headers' && (
           <div className="p-4 space-y-3">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span className="font-mono text-[11px] text-cyan-400/80">// Custom Headers (RFC 7230)</span>
-              <div className="flex items-center gap-2">
+            {/* Banner explicativo de Encabezados HTTP */}
+            <div className="p-3 rounded-lg bg-[#070b16] border border-indigo-500/20 text-xs font-mono space-y-1">
+              <div className="flex items-center justify-between text-[11px] text-indigo-300 font-bold">
+                <span>// Metadatos HTTP (Encabezados / Headers - RFC 7230)</span>
+                <span className="text-[10px] text-slate-400 font-normal">Viajan en la cabecera, no en la URL</span>
+              </div>
+              <p className="text-slate-400 text-[11px] leading-relaxed">
+                Los encabezados son metadatos que describen la solicitud (como <code className="text-indigo-300 font-bold">Content-Type</code> o credenciales de autenticación <code className="text-indigo-300 font-bold">Authorization</code>). Los encabezados confidenciales quedan automáticamente enmascarados en el historial de misiones.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 pt-1">
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono text-[10px] text-slate-500 uppercase">Insertar rápido:</span>
                 <button
-                  onClick={() => setHeaders((prev) => [...prev, { id: String(Date.now()), key: 'Content-Type', value: 'application/json', enabled: true }])}
-                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-400 hover:text-cyan-300"
+                  onClick={() => insertQuickHeader('Content-Type', 'application/json')}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-slate-800 hover:border-indigo-500/40 text-slate-300 hover:text-indigo-300"
                 >
                   + Content-Type
                 </button>
                 <button
-                  onClick={addHeader}
-                  className="px-2.5 py-1 rounded text-xs font-mono bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/30 text-cyan-300 flex items-center gap-1 transition"
+                  onClick={() => insertQuickHeader('Authorization', 'Bearer {{TOKEN}}')}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-slate-800 hover:border-amber-500/40 text-slate-300 hover:text-amber-300"
                 >
-                  <Plus className="h-3 w-3" />
-                  <span>AÑADIR ENCABEZADO</span>
+                  + Bearer Token
+                </button>
+                <button
+                  onClick={() => insertQuickHeader('Accept', 'application/json')}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300"
+                >
+                  + Accept
                 </button>
               </div>
+              <button
+                onClick={addHeader}
+                className="px-2.5 py-1 rounded text-xs font-mono bg-cyan-950/40 hover:bg-cyan-900/60 border border-cyan-500/30 text-cyan-300 flex items-center gap-1 transition"
+              >
+                <Plus className="h-3 w-3" />
+                <span>AÑADIR ENCABEZADO</span>
+              </button>
             </div>
 
             <div className="space-y-2">
-              {headers.map((h) => (
-                <div key={h.id} className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={h.enabled}
-                    onChange={(e) => updateHeader(h.id, 'enabled', e.target.checked)}
-                    className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500 h-4 w-4"
-                  />
-                  <input
-                    type="text"
-                    value={h.key}
-                    onChange={(e) => updateHeader(h.id, 'key', e.target.value)}
-                    placeholder="Encabezado (ej. Authorization)"
-                    className="flex-1 px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
-                  />
-                  <input
-                    type="text"
-                    value={h.value}
-                    onChange={(e) => updateHeader(h.id, 'value', e.target.value)}
-                    placeholder="Valor (ej. Bearer secreto_123)"
-                    className="flex-1 px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
-                  />
-                  <button
-                    onClick={() => removeHeader(h.id)}
-                    className="p-1.5 text-slate-500 hover:text-rose-400 transition"
-                    title="Eliminar encabezado"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))}
+              {headers.map((h) => {
+                const isSensitive = isSensitiveHeader(h.key);
+                return (
+                  <div key={h.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={h.enabled}
+                      onChange={(e) => updateHeader(h.id, 'enabled', e.target.checked)}
+                      title={h.enabled ? 'Encabezado habilitado' : 'Encabezado deshabilitado'}
+                      className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500 h-4 w-4 cursor-pointer"
+                    />
+                    <div className="flex-1 relative">
+                      <input
+                        type="text"
+                        value={h.key}
+                        onChange={(e) => updateHeader(h.id, 'key', e.target.value)}
+                        placeholder="Encabezado (ej. Authorization)"
+                        className="w-full px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
+                      />
+                    </div>
+                    <div className="flex-1 relative">
+                      <input
+                        type="text"
+                        value={h.value}
+                        onChange={(e) => updateHeader(h.id, 'value', e.target.value)}
+                        placeholder="Valor (ej. Bearer {{TOKEN}})"
+                        className="w-full px-3 py-1.5 rounded bg-[#050811] border border-slate-800 focus:border-cyan-500 text-xs font-mono text-slate-200 placeholder:text-slate-600"
+                      />
+                    </div>
+                    {isSensitive && (
+                      <span
+                        title="Encabezado de credenciales confidenciales: se redactará en el historial"
+                        className="flex items-center gap-1 text-[10px] font-mono text-amber-400 bg-amber-950/50 border border-amber-500/30 px-1.5 py-0.5 rounded shrink-0"
+                      >
+                        <Shield className="h-2.5 w-2.5" />
+                        <span className="hidden sm:inline">Protegido</span>
+                      </span>
+                    )}
+                    <button
+                      onClick={() => removeHeader(h.id)}
+                      className="p-1.5 text-slate-500 hover:text-rose-400 transition"
+                      title="Eliminar encabezado"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -660,45 +1018,57 @@ export function RequestBuilder({
         {/* Contenido de Pestaña: Cuerpo JSON */}
         {activeRequestTab === 'body' && (
           <div className="p-4 space-y-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-mono text-[11px] text-cyan-400/80">
-                // Payload JSON ({method === 'GET' ? 'No aplica en método GET' : 'Activo'})
-              </span>
-              <div className="flex items-center gap-2">
-                {jsonSyntaxError ? (
-                  <span className="text-[11px] font-mono text-rose-400 flex items-center gap-1">
-                    <AlertTriangle className="h-3 w-3" />
-                    <span>Error de Sintaxis JSON</span>
-                  </span>
-                ) : bodyText.trim() ? (
-                  <span className="text-[11px] font-mono text-emerald-400 flex items-center gap-1">
-                    <CheckCircle2 className="h-3 w-3" />
-                    <span>JSON Válido</span>
-                  </span>
-                ) : null}
-                <button
-                  onClick={formatJson}
-                  disabled={!bodyText.trim() || !!jsonSyntaxError}
-                  className="px-2.5 py-1 rounded text-xs font-mono bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition flex items-center gap-1 disabled:opacity-40"
-                >
-                  <Sparkles className="h-3 w-3 text-cyan-400" />
-                  <span>FORMATEAR</span>
-                </button>
+            {method === 'GET' ? (
+              <div className="p-4 rounded-lg bg-[#070b16] border border-slate-800 text-xs font-mono space-y-2">
+                <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
+                  <FileText className="h-4 w-4" />
+                  <span>MÉTODO GET: CUERPO DE SOLICITUD DESHABILITADO</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  Según el estándar HTTP (RFC 7231), las solicitudes <code className="text-cyan-300 font-bold">GET</code> se utilizan exclusivamente para consultar recursos remotos sin enviar carga útil en el cuerpo.
+                </p>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  Para enviar parámetros de consulta, utiliza la pestaña <code className="text-cyan-300 font-bold">PARÁMETROS</code>. Si necesitas enviar un cuerpo estructurado en JSON, selecciona en el selector superior <code className="text-indigo-300 font-bold">POST</code>, <code className="text-amber-300 font-bold">PUT</code> o <code className="text-purple-300 font-bold">PATCH</code>.
+                </p>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-mono text-[11px] text-cyan-400/80">
+                    // Payload JSON para método {method}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {jsonSyntaxError ? (
+                      <span className="text-[11px] font-mono text-rose-400 flex items-center gap-1 bg-rose-950/40 px-2 py-0.5 rounded border border-rose-500/30">
+                        <AlertTriangle className="h-3 w-3" />
+                        <span>Sintaxis Inválida: {jsonSyntaxError}</span>
+                      </span>
+                    ) : bodyText.trim() ? (
+                      <span className="text-[11px] font-mono text-emerald-400 flex items-center gap-1 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
+                        <CheckCircle2 className="h-3 w-3" />
+                        <span>JSON Válido</span>
+                      </span>
+                    ) : null}
+                    <button
+                      onClick={formatJson}
+                      disabled={!bodyText.trim() || !!jsonSyntaxError}
+                      className="px-2.5 py-1 rounded text-xs font-mono bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition flex items-center gap-1 disabled:opacity-40"
+                    >
+                      <Sparkles className="h-3 w-3 text-cyan-400" />
+                      <span>FORMATEAR</span>
+                    </button>
+                  </div>
+                </div>
 
-            <textarea
-              value={bodyText}
-              onChange={(e) => setBodyText(e.target.value)}
-              disabled={method === 'GET'}
-              rows={8}
-              placeholder={
-                method === 'GET'
-                  ? '// Los métodos GET no suelen admitir cuerpo en peticiones HTTP.'
-                  : '{\n  "clave": "valor",\n  "numero": 100\n}'
-              }
-              className="w-full p-3 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none leading-relaxed resize-y disabled:opacity-40"
-            />
+                <textarea
+                  value={bodyText}
+                  onChange={(e) => setBodyText(e.target.value)}
+                  rows={8}
+                  placeholder={'{\n  "nombre": "{{USER_NAME}}",\n  "activo": true\n}'}
+                  className="w-full p-3 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none leading-relaxed resize-y"
+                />
+              </>
+            )}
           </div>
         )}
 
