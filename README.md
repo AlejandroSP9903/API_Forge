@@ -30,7 +30,7 @@ La **Fase 0** establece las bases estructurales y de verificación del sistema:
 
 ### 1. Clonar el repositorio
 ```bash
-git clone <URL_DEL_REPOSITORIO> api-forge
+git clone https://github.com/AlejandroSP9903/API_Forge api-forge
 cd api-forge
 ```
 
