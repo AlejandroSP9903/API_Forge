@@ -80,6 +80,7 @@ export const savedRequests = sqliteTable('saved_requests', {
   headers: text('headers'),
   queryParams: text('query_params'),
   body: text('body'),
+  auth: text('auth'),
   contentType: text('content_type'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),

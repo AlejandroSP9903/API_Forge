@@ -28,6 +28,11 @@ import {
   FolderArchive,
   Globe,
   ExternalLink,
+  Key,
+  Lock,
+  Eye,
+  EyeOff,
+  ShieldCheck,
 } from 'lucide-react';
 import type {
   HttpMethod,
@@ -35,6 +40,8 @@ import type {
   ExecuteRequestResult,
   EnvironmentData,
   EnvironmentSummary,
+  RequestAuthConfig,
+  AuthType,
 } from '../../packages/shared/types.ts';
 import type { KeyValueItem } from '../types/hunter.ts';
 import { playSound } from '../services/audioService.ts';
@@ -44,6 +51,29 @@ import {
   interpolateString,
   VARIABLE_REGEX,
 } from '../services/environmentService.ts';
+
+/**
+ * Normaliza un token Bearer evitando prefijos redundantes (Fase 1G)
+ */
+export function formatBearerToken(rawToken: string): string {
+  const trimmed = (rawToken || '').trim();
+  if (!trimmed) return '';
+  if (/^bearer\s+/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `Bearer ${trimmed}`;
+}
+
+/**
+ * Codifica credenciales en Base64 seguro para UTF-8 (Fase 1G)
+ */
+export function encodeBasicAuth(username: string, password: string): string {
+  try {
+    return btoa(unescape(encodeURIComponent(`${username}:${password}`)));
+  } catch {
+    return btoa(`${username}:${password}`);
+  }
+}
 
 interface RequestBuilderProps {
   initialPayload?: ExecuteRequestPayload | null;
@@ -121,7 +151,7 @@ export function RequestBuilder({
   // Estado de configuración de solicitud
   const [method, setMethod] = useState<HttpMethod>('GET');
   const [url, setUrl] = useState<string>('https://jsonplaceholder.typicode.com/posts/1');
-  const [activeRequestTab, setActiveRequestTab] = useState<'params' | 'headers' | 'body' | 'config'>('params');
+  const [activeRequestTab, setActiveRequestTab] = useState<'params' | 'headers' | 'auth' | 'body' | 'config'>('params');
 
   // Parámetros de consulta y encabezados
   const [queryParams, setQueryParams] = useState<KeyValueItem[]>([
@@ -130,6 +160,15 @@ export function RequestBuilder({
   const [headers, setHeaders] = useState<KeyValueItem[]>([
     { id: '1', key: 'Accept', value: 'application/json', enabled: true },
   ]);
+
+  // Estado de Autenticación HTTP (Fase 1G)
+  const [authConfig, setAuthConfig] = useState<RequestAuthConfig>({
+    type: 'none',
+    bearer: { token: '' },
+    basic: { username: '', password: '' },
+    apiKey: { key: 'X-API-Key', value: '', addTo: 'header' },
+  });
+  const [showBasicPassword, setShowBasicPassword] = useState<boolean>(false);
 
   // Cuerpo y configuración
   const [bodyText, setBodyText] = useState<string>('');
@@ -168,15 +207,27 @@ export function RequestBuilder({
       queryParams: Object.keys(cleanParams).length > 0 ? cleanParams : undefined,
       headers: Object.keys(cleanHeaders).length > 0 ? cleanHeaders : undefined,
       body: parsedBody,
+      auth: authConfig.type !== 'none' ? authConfig : undefined,
       timeoutMs,
       maxRedirects,
     };
-  }, [url, method, queryParams, headers, bodyText, timeoutMs, maxRedirects]);
+  }, [url, method, queryParams, headers, bodyText, authConfig, timeoutMs, maxRedirects]);
 
-  // Cálculo de vista previa de URL resultante en tiempo real (Base + Query Params + Interpolación)
+  // Cálculo de vista previa de URL resultante en tiempo real (Base + Query Params + API Key Query + Interpolación)
   const effectiveUrlPreview = useMemo(() => {
     const cleanBase = url.trim();
-    const enabledParams = queryParams.filter((p) => p.enabled && p.key.trim());
+    const enabledParams: KeyValueItem[] = [...queryParams.filter((p) => p.enabled && p.key.trim())];
+
+    // Si la autenticación es API Key en Query Param, incorporarla al cálculo de la URL efectiva
+    if (authConfig.type === 'apikey' && authConfig.apiKey?.addTo === 'query' && authConfig.apiKey.key.trim()) {
+      enabledParams.push({
+        id: 'auth_apikey_preview',
+        key: authConfig.apiKey.key.trim(),
+        value: authConfig.apiKey.value || '',
+        enabled: true,
+      });
+    }
+
     const hasParams = enabledParams.length > 0;
 
     if (!cleanBase) {
@@ -212,7 +263,7 @@ export function RequestBuilder({
       resolvedUrlWithParams,
       hasParams,
     };
-  }, [url, queryParams, activeEnvironment]);
+  }, [url, queryParams, authConfig, activeEnvironment]);
 
   // Sincronizar hacia afuera el payload actual cuando cambia
   useEffect(() => {
@@ -232,7 +283,7 @@ export function RequestBuilder({
   // AbortController para cancelación en vuelo
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Cargar carga inicial si proviene del historial
+  // Cargar carga inicial si proviene del historial o colección
   useEffect(() => {
     if (initialPayload) {
       setMethod(initialPayload.method || 'GET');
@@ -258,6 +309,28 @@ export function RequestBuilder({
       }
       if (initialPayload.body) {
         setBodyText(typeof initialPayload.body === 'object' ? JSON.stringify(initialPayload.body, null, 2) : String(initialPayload.body));
+      }
+      if (initialPayload.auth) {
+        setAuthConfig({
+          type: initialPayload.auth.type || 'none',
+          bearer: { token: initialPayload.auth.bearer?.token || '' },
+          basic: {
+            username: initialPayload.auth.basic?.username || '',
+            password: initialPayload.auth.basic?.password || '',
+          },
+          apiKey: {
+            key: initialPayload.auth.apiKey?.key || 'X-API-Key',
+            value: initialPayload.auth.apiKey?.value || '',
+            addTo: initialPayload.auth.apiKey?.addTo || 'header',
+          },
+        });
+      } else {
+        setAuthConfig({
+          type: 'none',
+          bearer: { token: '' },
+          basic: { username: '', password: '' },
+          apiKey: { key: 'X-API-Key', value: '', addTo: 'header' },
+        });
       }
     } else {
       setHasProtectedValuesWarning(false);
@@ -364,11 +437,12 @@ export function RequestBuilder({
       queryParams: Object.keys(cleanParams).length > 0 ? cleanParams : undefined,
       headers: Object.keys(cleanHeaders).length > 0 ? cleanHeaders : undefined,
       body: method === 'GET' ? null : parsedBody,
+      auth: authConfig.type !== 'none' ? authConfig : undefined,
       timeoutMs,
       maxRedirects,
     };
 
-    // 3.5. Detección e interpolación de variables {{VARIABLE}} (Fase 1E)
+    // 3.5. Detección e interpolación de variables {{VARIABLE}} (Fase 1E & 1G)
     let payloadToSend: ExecuteRequestPayload = payload;
     const hasVarInUrl = varPattern.test(url);
     const hasVarInParams = queryParams.some(
@@ -378,7 +452,15 @@ export function RequestBuilder({
       (h) => h.enabled && (varPattern.test(h.key) || varPattern.test(h.value))
     );
     const hasVarInBody = varPattern.test(bodyText);
-    const hasVariables = hasVarInUrl || hasVarInParams || hasVarInHeaders || hasVarInBody;
+    const hasVarInAuth =
+      authConfig.type === 'bearer'
+        ? varPattern.test(authConfig.bearer?.token || '')
+        : authConfig.type === 'basic'
+        ? varPattern.test(authConfig.basic?.username || '') || varPattern.test(authConfig.basic?.password || '')
+        : authConfig.type === 'apikey'
+        ? varPattern.test(authConfig.apiKey?.key || '') || varPattern.test(authConfig.apiKey?.value || '')
+        : false;
+    const hasVariables = hasVarInUrl || hasVarInParams || hasVarInHeaders || hasVarInBody || hasVarInAuth;
 
     if (hasVariables) {
       if (!activeEnvironment) {
@@ -457,6 +539,42 @@ export function RequestBuilder({
         setExecutionResult(errResult);
         setLoading(false);
         return;
+      }
+    }
+
+    // 3.6. Inyectar credenciales de autenticación HTTP en encabezados o query params (Fase 1G)
+    const effectiveAuth = payloadToSend.auth;
+    if (effectiveAuth && effectiveAuth.type !== 'none') {
+      if (effectiveAuth.type === 'bearer' && effectiveAuth.bearer?.token) {
+        const formattedBearer = formatBearerToken(effectiveAuth.bearer.token);
+        payloadToSend.headers = {
+          ...(payloadToSend.headers || {}),
+          Authorization: formattedBearer,
+        };
+      } else if (effectiveAuth.type === 'basic' && effectiveAuth.basic) {
+        const u = effectiveAuth.basic.username || '';
+        const p = effectiveAuth.basic.password || '';
+        const encoded = encodeBasicAuth(u, p);
+        payloadToSend.headers = {
+          ...(payloadToSend.headers || {}),
+          Authorization: `Basic ${encoded}`,
+        };
+      } else if (effectiveAuth.type === 'apikey' && effectiveAuth.apiKey) {
+        const key = (effectiveAuth.apiKey.key || '').trim();
+        const val = effectiveAuth.apiKey.value || '';
+        if (key) {
+          if (effectiveAuth.apiKey.addTo === 'query') {
+            payloadToSend.queryParams = {
+              ...(payloadToSend.queryParams || {}),
+              [key]: val,
+            };
+          } else {
+            payloadToSend.headers = {
+              ...(payloadToSend.headers || {}),
+              [key]: val,
+            };
+          }
+        }
       }
     }
 
@@ -581,6 +699,13 @@ export function RequestBuilder({
     } else {
       setQueryParams([{ id: '1', key: '', value: '', enabled: true }]);
     }
+
+    setAuthConfig({
+      type: 'none',
+      bearer: { token: '' },
+      basic: { username: '', password: '' },
+      apiKey: { key: 'X-API-Key', value: '', addTo: 'header' },
+    });
   };
 
   return (
@@ -824,6 +949,23 @@ export function RequestBuilder({
           </button>
 
           <button
+            onClick={() => setActiveRequestTab('auth')}
+            className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
+              activeRequestTab === 'auth'
+                ? 'text-cyan-300 border-b-2 border-cyan-400 -mb-px'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Key className="h-3.5 w-3.5" />
+            <span>AUTENTICACIÓN</span>
+            {authConfig.type !== 'none' && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 uppercase">
+                {authConfig.type === 'bearer' ? 'BEARER' : authConfig.type === 'basic' ? 'BASIC' : 'API KEY'}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={() => setActiveRequestTab('body')}
             className={`px-4 py-3 text-xs font-mono font-bold transition flex items-center gap-2 relative whitespace-nowrap ${
               activeRequestTab === 'body'
@@ -1012,6 +1154,314 @@ export function RequestBuilder({
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {/* Contenido de Pestaña: Autenticación HTTP (Fase 1G) */}
+        {activeRequestTab === 'auth' && (
+          <div className="p-4 space-y-4">
+            {/* Selector de Tipo de Autenticación */}
+            <div className="space-y-2">
+              <label className="text-xs font-mono text-cyan-400 font-bold flex items-center gap-2">
+                <Key className="h-3.5 w-3.5" />
+                <span>// TIPO DE AUTENTICACIÓN HTTP</span>
+              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { id: 'none', label: 'Sin autenticación', icon: Shield },
+                  { id: 'bearer', label: 'Bearer Token', icon: Key },
+                  { id: 'basic', label: 'Basic Auth', icon: Lock },
+                  { id: 'apikey', label: 'API Key', icon: ShieldCheck },
+                ].map((item) => {
+                  const isSelected = authConfig.type === item.id;
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          type: item.id as AuthType,
+                        }))
+                      }
+                      className={`p-2.5 rounded-lg border text-xs font-mono flex items-center gap-2 transition ${
+                        isSelected
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] font-bold'
+                          : 'bg-[#070b16] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                      }`}
+                    >
+                      <Icon className={`h-4 w-4 ${isSelected ? 'text-cyan-400' : 'text-slate-500'}`} />
+                      <span className="truncate">{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Configuración Dinámica según Tipo */}
+            {authConfig.type === 'none' && (
+              <div className="p-4 rounded-lg bg-[#070b16] border border-slate-800 text-xs font-mono space-y-2">
+                <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
+                  <Shield className="h-4 w-4" />
+                  <span>SOLICITUD PÚBLICA // SIN CREDENCIALES</span>
+                </div>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  No se inyectará ningún encabezado ni parámetro de autenticación en la solicitud. Si el servidor remoto requiere autenticación personalizada, puedes configurar encabezados manuales en la pestaña <code className="text-cyan-300 font-bold">ENCABEZADOS</code> o seleccionar un método arriba.
+                </p>
+              </div>
+            )}
+
+            {authConfig.type === 'bearer' && (
+              <div className="space-y-4 p-4 rounded-lg bg-[#070b16] border border-cyan-500/20">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs font-mono">
+                    <label className="text-slate-300 font-bold flex items-center gap-1.5">
+                      <Key className="h-3.5 w-3.5 text-cyan-400" />
+                      <span>Token Bearer:</span>
+                    </label>
+                    <span className="text-[10px] text-slate-400">Admite variables ej: {'{{TOKEN}}'}</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={authConfig.bearer?.token || ''}
+                    onChange={(e) =>
+                      setAuthConfig((prev) => ({
+                        ...prev,
+                        bearer: { token: e.target.value },
+                      }))
+                    }
+                    placeholder="eyJhbGciOiJIUzI1Ni... o {{TOKEN}}"
+                    className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none"
+                  />
+                  <p className="text-[11px] font-mono text-slate-400 leading-relaxed">
+                    Introduce únicamente el token. API Forge añadirá automáticamente el prefijo <code className="text-cyan-300 font-bold">Bearer </code> (y no lo duplicará si ya lo incluyes).
+                  </p>
+                </div>
+
+                {/* Previsualización en tiempo real del encabezado Bearer */}
+                <div className="p-3 rounded-lg bg-black/40 border border-slate-800/80 text-[11px] font-mono space-y-1">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">// Encabezado HTTP que se generará:</div>
+                  <div className="text-cyan-300 flex items-center gap-2 overflow-x-auto">
+                    <span className="text-slate-400 font-bold">Authorization:</span>
+                    <span>
+                      {authConfig.bearer?.token ? formatBearerToken(authConfig.bearer.token) : '<Bearer [TOKEN]>'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {authConfig.type === 'basic' && (
+              <div className="space-y-4 p-4 rounded-lg bg-[#070b16] border border-cyan-500/20">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <label className="text-slate-300 font-bold flex items-center gap-1.5">
+                        <Lock className="h-3.5 w-3.5 text-cyan-400" />
+                        <span>Usuario (Username):</span>
+                      </label>
+                      <span className="text-[10px] text-slate-400">Admite {'{{USER}}'}</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={authConfig.basic?.username || ''}
+                      onChange={(e) =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          basic: {
+                            username: e.target.value,
+                            password: prev.basic?.password || '',
+                          },
+                        }))
+                      }
+                      placeholder="admin o {{USUARIO}}"
+                      className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <label className="text-slate-300 font-bold flex items-center gap-1.5">
+                        <Lock className="h-3.5 w-3.5 text-cyan-400" />
+                        <span>Contraseña (Password):</span>
+                      </label>
+                      <span className="text-[10px] text-slate-400">Admite {'{{PASS}}'}</span>
+                    </div>
+                    <div className="relative">
+                      <input
+                        type={showBasicPassword ? 'text' : 'password'}
+                        value={authConfig.basic?.password || ''}
+                        onChange={(e) =>
+                          setAuthConfig((prev) => ({
+                            ...prev,
+                            basic: {
+                              username: prev.basic?.username || '',
+                              password: e.target.value,
+                            },
+                          }))
+                        }
+                        placeholder="•••••••• o {{PASSWORD}}"
+                        className="w-full pl-3 pr-10 py-2 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowBasicPassword((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-cyan-300 transition"
+                        title={showBasicPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
+                      >
+                        {showBasicPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[11px] font-mono text-slate-400 leading-relaxed">
+                  Las credenciales se codificarán en Base64 según el estándar RFC 7617 antes de enviarse.
+                </p>
+
+                {/* Previsualización en tiempo real del encabezado Basic */}
+                <div className="p-3 rounded-lg bg-black/40 border border-slate-800/80 text-[11px] font-mono space-y-1">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">// Encabezado HTTP que se generará:</div>
+                  <div className="text-cyan-300 flex items-center gap-2 overflow-x-auto">
+                    <span className="text-slate-400 font-bold">Authorization:</span>
+                    <span>
+                      {authConfig.basic?.username || authConfig.basic?.password
+                        ? `Basic ${encodeBasicAuth(authConfig.basic.username || '', authConfig.basic.password || '')}`
+                        : '<Basic base64(usuario:contraseña)>'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {authConfig.type === 'apikey' && (
+              <div className="space-y-4 p-4 rounded-lg bg-[#070b16] border border-cyan-500/20">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <label className="text-slate-300 font-bold flex items-center gap-1.5">
+                        <Key className="h-3.5 w-3.5 text-cyan-400" />
+                        <span>Nombre / Clave (Key Name):</span>
+                      </label>
+                      <span className="text-[10px] text-slate-400">ej: X-API-Key</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={authConfig.apiKey?.key || ''}
+                      onChange={(e) =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          apiKey: {
+                            key: e.target.value,
+                            value: prev.apiKey?.value || '',
+                            addTo: prev.apiKey?.addTo || 'header',
+                          },
+                        }))
+                      }
+                      placeholder="X-API-Key o api_key"
+                      className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <label className="text-slate-300 font-bold flex items-center gap-1.5">
+                        <Lock className="h-3.5 w-3.5 text-cyan-400" />
+                        <span>Valor (Value):</span>
+                      </label>
+                      <span className="text-[10px] text-slate-400">Admite {'{{API_KEY}}'}</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={authConfig.apiKey?.value || ''}
+                      onChange={(e) =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          apiKey: {
+                            key: prev.apiKey?.key || 'X-API-Key',
+                            value: e.target.value,
+                            addTo: prev.apiKey?.addTo || 'header',
+                          },
+                        }))
+                      }
+                      placeholder="hunter_live_key_xxx o {{API_KEY}}"
+                      className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-slate-800 focus:border-cyan-400 text-xs font-mono text-cyan-300 placeholder:text-slate-600 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Selector Añadir a (Add to) */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-mono text-slate-300 font-bold block">
+                    Añadir a (Add To):
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          apiKey: {
+                            key: prev.apiKey?.key || 'X-API-Key',
+                            value: prev.apiKey?.value || '',
+                            addTo: 'header',
+                          },
+                        }))
+                      }
+                      className={`flex-1 py-2 px-3 rounded-lg border text-xs font-mono transition flex items-center justify-center gap-2 ${
+                        authConfig.apiKey?.addTo === 'header'
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 font-bold shadow-[0_0_12px_rgba(6,182,212,0.15)]'
+                          : 'bg-[#050811] border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>Encabezado HTTP (Header)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAuthConfig((prev) => ({
+                          ...prev,
+                          apiKey: {
+                            key: prev.apiKey?.key || 'api_key',
+                            value: prev.apiKey?.value || '',
+                            addTo: 'query',
+                          },
+                        }))
+                      }
+                      className={`flex-1 py-2 px-3 rounded-lg border text-xs font-mono transition flex items-center justify-center gap-2 ${
+                        authConfig.apiKey?.addTo === 'query'
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 font-bold shadow-[0_0_12px_rgba(6,182,212,0.15)]'
+                          : 'bg-[#050811] border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>Parámetro de consulta (Query Params)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Previsualización en tiempo real de API Key */}
+                <div className="p-3 rounded-lg bg-black/40 border border-slate-800/80 text-[11px] font-mono space-y-1">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">
+                    // Inyección activa en {authConfig.apiKey?.addTo === 'query' ? 'Parámetros de Consulta (URL)' : 'Encabezados HTTP'}:
+                  </div>
+                  <div className="text-cyan-300 flex items-center gap-2 overflow-x-auto">
+                    {authConfig.apiKey?.addTo === 'query' ? (
+                      <>
+                        <span className="text-slate-400 font-bold">Query:</span>
+                        <span>?{authConfig.apiKey.key || 'key'}={authConfig.apiKey.value || '[VALOR]'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-slate-400 font-bold">{authConfig.apiKey?.key || 'X-API-Key'}:</span>
+                        <span>{authConfig.apiKey?.value || '[VALOR]'}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

@@ -252,6 +252,7 @@ export function CollectionsPanel({
           headers: currentBuilderPayload.headers,
           queryParams: currentBuilderPayload.queryParams,
           body: currentBuilderPayload.body,
+          auth: currentBuilderPayload.auth,
         });
       } else {
         await createSavedRequestApi(selectedCollectionId, {
@@ -307,6 +308,7 @@ export function CollectionsPanel({
         headers: currentBuilderPayload.headers,
         queryParams: currentBuilderPayload.queryParams,
         body: currentBuilderPayload.body,
+        auth: currentBuilderPayload.auth,
       });
 
       playSound('requestSuccess');
@@ -327,6 +329,7 @@ export function CollectionsPanel({
       headers: saved.headers,
       queryParams: saved.queryParams,
       body: saved.body,
+      auth: saved.auth,
     };
 
     playSound('requestSuccess');

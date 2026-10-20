@@ -16,12 +16,14 @@ import type {
   UpdateCollectionPayload,
   CreateSavedRequestPayload,
   UpdateSavedRequestPayload,
+  RequestAuthConfig,
 } from '../../packages/shared/types.ts';
 import {
   sanitizeUrl,
   sanitizeHeaders,
   sanitizeQueryParams,
   sanitizeBody,
+  sanitizeAuth,
   hasProtectedSecrets,
 } from '../../src/services/historySecurityService.ts';
 
@@ -70,12 +72,22 @@ function mapSavedRequestRow(row: SavedRequest): SavedRequestData {
     }
   }
 
+  let parsedAuth: RequestAuthConfig | undefined = undefined;
+  if (row.auth) {
+    try {
+      parsedAuth = JSON.parse(row.auth);
+    } catch {
+      parsedAuth = undefined;
+    }
+  }
+
   const payloadForSecretCheck = {
     url: row.url,
     method: row.method as HttpMethod,
     headers: parsedHeaders,
     queryParams: parsedParams,
     body: parsedBody,
+    auth: parsedAuth,
   };
 
   return {
@@ -87,6 +99,7 @@ function mapSavedRequestRow(row: SavedRequest): SavedRequestData {
     headers: parsedHeaders,
     queryParams: parsedParams,
     body: parsedBody,
+    auth: parsedAuth,
     contentType: row.contentType || undefined,
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
@@ -299,6 +312,7 @@ export async function createSavedRequest(
   const { sanitizedHeaders } = sanitizeHeaders(payload.headers);
   const { sanitizedParams } = sanitizeQueryParams(payload.queryParams);
   const { sanitizedBody } = sanitizeBody(payload.body);
+  const { sanitizedAuth } = sanitizeAuth(payload.auth);
 
   const now = new Date();
   const id = `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
@@ -308,6 +322,7 @@ export async function createSavedRequest(
   const serializedBody = sanitizedBody !== undefined && sanitizedBody !== null
     ? (typeof sanitizedBody === 'object' ? JSON.stringify(sanitizedBody) : String(sanitizedBody))
     : null;
+  const serializedAuth = sanitizedAuth ? JSON.stringify(sanitizedAuth) : null;
 
   await db.insert(savedRequests).values({
     id,
@@ -318,6 +333,7 @@ export async function createSavedRequest(
     headers: serializedHeaders,
     queryParams: serializedParams,
     body: serializedBody,
+    auth: serializedAuth,
     contentType: payload.contentType || (sanitizedHeaders ? sanitizedHeaders['content-type'] : null),
     createdAt: now,
     updatedAt: now,
@@ -402,6 +418,11 @@ export async function updateSavedRequest(
 
   if (payload.contentType !== undefined) {
     updateValues.contentType = payload.contentType;
+  }
+
+  if (payload.auth !== undefined) {
+    const { sanitizedAuth } = sanitizeAuth(payload.auth);
+    updateValues.auth = sanitizedAuth ? JSON.stringify(sanitizedAuth) : null;
   }
 
   await db.update(savedRequests).set(updateValues).where(eq(savedRequests.id, requestId));

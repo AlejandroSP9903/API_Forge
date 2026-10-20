@@ -82,12 +82,20 @@ export async function runMigrations(): Promise<MigrationResult> {
         headers TEXT,
         query_params TEXT,
         body TEXT,
+        auth TEXT,
         content_type TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
       );
     `);
+
+    // Intentar agregar columna auth si la tabla ya existía en versiones anteriores
+    try {
+      await client.execute(`ALTER TABLE saved_requests ADD COLUMN auth TEXT;`);
+    } catch {
+      // Ignorar si la columna ya existe
+    }
 
     // 8. Crear índice para optimizar consultas de solicitudes por colección
     await client.execute(`

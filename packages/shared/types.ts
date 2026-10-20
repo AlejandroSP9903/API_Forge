@@ -44,12 +44,41 @@ export interface ApiResponseError {
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
+/* ==========================================================================
+ * FASE 1G: TIPOS DE AUTENTICACIÓN HTTP (AUTH SYSTEM)
+ * ========================================================================== */
+
+export type AuthType = 'none' | 'bearer' | 'basic' | 'apikey';
+
+export interface BearerAuthConfig {
+  token: string;
+}
+
+export interface BasicAuthConfig {
+  username: string;
+  password: string;
+}
+
+export interface ApiKeyAuthConfig {
+  key: string;
+  value: string;
+  addTo: 'header' | 'query';
+}
+
+export interface RequestAuthConfig {
+  type: AuthType;
+  bearer?: BearerAuthConfig;
+  basic?: BasicAuthConfig;
+  apiKey?: ApiKeyAuthConfig;
+}
+
 export interface HttpRequestDefinition {
   url: string;
   method?: HttpMethod;
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: string | object | null;
+  auth?: RequestAuthConfig;
   timeoutMs?: number;
   maxResponseSizeBytes?: number;
   maxRedirects?: number;
@@ -102,6 +131,7 @@ export interface ExecuteRequestPayload {
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: string | object | null;
+  auth?: RequestAuthConfig;
   timeoutMs?: number;
   maxResponseSizeBytes?: number;
   maxRedirects?: number;
@@ -120,6 +150,7 @@ export interface SavedRequestData {
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: string | object | null;
+  auth?: RequestAuthConfig;
   contentType?: string;
   createdAt: string;
   updatedAt: string;
@@ -156,6 +187,7 @@ export interface CreateSavedRequestPayload {
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: string | object | null;
+  auth?: RequestAuthConfig;
   contentType?: string;
 }
 
@@ -166,6 +198,7 @@ export interface UpdateSavedRequestPayload {
   headers?: Record<string, string>;
   queryParams?: Record<string, string | number | boolean>;
   body?: string | object | null;
+  auth?: RequestAuthConfig;
   contentType?: string;
 }
 

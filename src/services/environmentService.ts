@@ -10,6 +10,7 @@ import type {
   CreateEnvironmentPayload,
   UpdateEnvironmentPayload,
   ExecuteRequestPayload,
+  RequestAuthConfig,
 } from '../../packages/shared/types.ts';
 
 const API_BASE = '/api/environments';
@@ -70,6 +71,10 @@ export async function fetchEnvironments(): Promise<EnvironmentSummary[]> {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error?.message || `Error ${response.status} al obtener entornos.`);
   }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    return [];
+  }
   return response.json();
 }
 
@@ -81,6 +86,10 @@ export async function fetchEnvironmentById(id: string): Promise<EnvironmentData>
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error?.message || `Error ${response.status} al obtener detalles del entorno.`);
+  }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('Respuesta del servidor no es JSON válido.');
   }
   return response.json();
 }
@@ -253,12 +262,37 @@ export function interpolateRequest(
     }
   }
 
+  // 5. Interpolar Configuración de Autenticación HTTP (Fase 1G)
+  let interpolatedAuth: RequestAuthConfig | undefined = undefined;
+  if (originalPayload.auth && originalPayload.auth.type !== 'none') {
+    interpolatedAuth = { type: originalPayload.auth.type };
+    if (originalPayload.auth.type === 'bearer' && originalPayload.auth.bearer) {
+      interpolatedAuth.bearer = {
+        token: interpolateString(originalPayload.auth.bearer.token, variablesMap, tracker),
+      };
+    } else if (originalPayload.auth.type === 'basic' && originalPayload.auth.basic) {
+      interpolatedAuth.basic = {
+        username: interpolateString(originalPayload.auth.basic.username, variablesMap, tracker),
+        password: interpolateString(originalPayload.auth.basic.password, variablesMap, tracker),
+      };
+    } else if (originalPayload.auth.type === 'apikey' && originalPayload.auth.apiKey) {
+      interpolatedAuth.apiKey = {
+        key: interpolateString(originalPayload.auth.apiKey.key, variablesMap, tracker),
+        value: interpolateString(originalPayload.auth.apiKey.value, variablesMap, tracker),
+        addTo: originalPayload.auth.apiKey.addTo,
+      };
+    }
+  } else if (originalPayload.auth) {
+    interpolatedAuth = { type: 'none' };
+  }
+
   const interpolatedPayload: ExecuteRequestPayload = {
     ...originalPayload,
     url: interpolatedUrl,
     queryParams: interpolatedQueryParams,
     headers: interpolatedHeaders,
     body: interpolatedBody,
+    auth: interpolatedAuth,
   };
 
   return {

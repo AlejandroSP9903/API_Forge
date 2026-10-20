@@ -21,6 +21,10 @@ export async function fetchCollections(): Promise<CollectionSummary[]> {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error?.message || `Error ${response.status} al obtener colecciones.`);
   }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    return [];
+  }
   return response.json();
 }
 
@@ -29,6 +33,10 @@ export async function fetchCollectionById(id: string): Promise<CollectionWithReq
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error?.message || `Error ${response.status} al obtener detalles de la colección.`);
+  }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('Respuesta del servidor no es JSON válido.');
   }
   return response.json();
 }

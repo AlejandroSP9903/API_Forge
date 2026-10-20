@@ -94,6 +94,9 @@ export default function App() {
   const [clientPingMs, setClientPingMs] = useState<number | null>(null);
   const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
+  // Estado de confirmación en línea para purga de historial (evita window.confirm en iframes)
+  const [isConfirmingPurge, setIsConfirmingPurge] = useState<boolean>(false);
+
   // Estado del Sistema de Audio Hunter
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => getAudioSettings());
 
@@ -268,10 +271,10 @@ export default function App() {
     }
   }, [history]);
 
-  // Consulta de Salud del Backend
-  const fetchHealthStatus = useCallback(async () => {
+  // Consulta de Salud del Backend con resiliencia ante arranque en frío
+  const fetchHealthStatus = useCallback(async (isSilentRetry?: boolean | unknown) => {
+    const silent = isSilentRetry === true;
     setLoadingHealth(true);
-    setHealthError(null);
     const start = performance.now();
 
     try {
@@ -294,14 +297,29 @@ export default function App() {
       } else {
         const rawText = await response.text();
         if (rawText.includes('<!doctype') || rawText.includes('<html')) {
-          throw new Error('El backend se está inicializando o devolvió HTML en vez de JSON.');
+          // El backend se está inicializando o el proxy retornó HTML temporalmente
+          setHealthError('Inicializando motor backend...');
+          setHealthData(null);
+          setTimeout(() => {
+            fetchHealthStatus(true);
+          }, 1500);
+          return;
         }
-        throw new Error(`Respuesta HTTP ${response.status}: ${rawText.slice(0, 100)}`);
+        setHealthError(`Respuesta HTTP ${response.status}: ${rawText.slice(0, 100)}`);
+        setHealthData(null);
       }
     } catch (err) {
-      console.error('Error consultando salud del backend:', err);
-      setHealthError(err instanceof Error ? err.message : 'No se pudo conectar con el servidor backend.');
-      setHealthData(null);
+      if (!silent) {
+        setHealthError('Conectando con el motor backend...');
+        setHealthData(null);
+        setTimeout(() => {
+          fetchHealthStatus(true);
+        }, 1500);
+      } else {
+        console.warn('[API Forge] Esperando conexión con el backend:', err);
+        setHealthError('Esperando al servidor backend...');
+        setHealthData(null);
+      }
     } finally {
       setLoadingHealth(false);
     }
@@ -309,7 +327,7 @@ export default function App() {
 
   useEffect(() => {
     fetchHealthStatus();
-    const interval = setInterval(fetchHealthStatus, 15000);
+    const interval = setInterval(() => fetchHealthStatus(true), 15000);
     return () => clearInterval(interval);
   }, [fetchHealthStatus]);
 
@@ -346,16 +364,21 @@ export default function App() {
     setActiveTab('builder');
   };
 
-  // Limpiar historial
+  // Limpiar historial con confirmación en línea (seguro para iframes)
   const handleClearHistory = () => {
-    if (window.confirm('¿Deseas purgar todo el registro histórico de misiones?')) {
-      setHistory([]);
-      try {
-        localStorage.removeItem(STORAGE_KEY_HISTORY);
-      } catch {
-        // ignore
-      }
+    if (!isConfirmingPurge) {
+      setIsConfirmingPurge(true);
+      setTimeout(() => setIsConfirmingPurge(false), 5000);
+      return;
     }
+    setHistory([]);
+    setIsConfirmingPurge(false);
+    try {
+      localStorage.removeItem(STORAGE_KEY_HISTORY);
+    } catch {
+      // ignore
+    }
+    playSound('requestStart');
   };
 
   // Forzar una auditoría y re-sanitización manual de todo el historial local
@@ -543,7 +566,7 @@ export default function App() {
 
             {/* Botón de Actualizar Diagnóstico */}
             <button
-              onClick={fetchHealthStatus}
+              onClick={() => fetchHealthStatus()}
               disabled={loadingHealth}
               title="Actualizar estado de enlace"
               className="p-1.5 rounded-lg border border-cyan-500/20 bg-[#050811] hover:bg-cyan-950/30 text-cyan-400 hover:text-cyan-300 transition disabled:opacity-50"
@@ -921,10 +944,15 @@ export default function App() {
                     {history.length > 0 && (
                       <button
                         onClick={handleClearHistory}
-                        className="px-3 py-1.5 rounded-lg bg-rose-950/30 hover:bg-rose-900/40 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-1.5 transition"
+                        className={`px-3 py-1.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 transition ${
+                          isConfirmingPurge
+                            ? 'bg-rose-600 text-white border-rose-400 animate-pulse font-bold'
+                            : 'bg-rose-950/30 hover:bg-rose-900/40 border-rose-500/30 text-rose-300'
+                        }`}
+                        title={isConfirmingPurge ? 'Haz clic de nuevo para confirmar la purga' : 'Purgar registro histórico'}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
-                        <span>PURGAR REGISTRO</span>
+                        <span>{isConfirmingPurge ? '¿CONFIRMAR PURGA?' : 'PURGAR REGISTRO'}</span>
                       </button>
                     )}
                   </div>

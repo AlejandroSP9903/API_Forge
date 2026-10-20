@@ -22,6 +22,17 @@ export function createApp(): Express {
   app.use('/api/collections', collectionsRouter);
   app.use('/api/environments', environmentsRouter);
 
+  // Fallback 404 para cualquier ruta /api no coincidente (evita que caiga en Vite SPA middleware retornando HTML)
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: {
+        code: 'API_ENDPOINT_NOT_FOUND',
+        message: `Ruta API no encontrada: [${req.method}] ${req.path}`,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  });
+
   // Manejador centralizado de errores
   app.use(errorHandler);
 

@@ -4,7 +4,7 @@
  * antes de persistir en el almacenamiento local para evitar la fuga de credenciales y secretos.
  */
 
-import type { ExecuteRequestPayload, ExecuteRequestResult } from '../../packages/shared/types.ts';
+import type { ExecuteRequestPayload, ExecuteRequestResult, RequestAuthConfig } from '../../packages/shared/types.ts';
 import type { MissionHistoryItem } from '../types/hunter.ts';
 
 export const REDACTED_MARKER = '[VALOR_PROTEGIDO]';
@@ -454,6 +454,73 @@ export function sanitizeResult(result?: ExecuteRequestResult): {
 }
 
 /**
+ * Sanitiza la configuración de autenticación HTTP (Fase 1G)
+ * Redacta tokens Bearer, contraseñas Basic Auth y valores de API Key sensibles.
+ */
+export function sanitizeAuth(
+  auth?: RequestAuthConfig
+): { sanitizedAuth?: RequestAuthConfig; redactedCount: number } {
+  if (!auth || typeof auth !== 'object' || auth.type === 'none') {
+    return { sanitizedAuth: auth ? { type: 'none' } : undefined, redactedCount: 0 };
+  }
+
+  let redactedCount = 0;
+  const cleanAuth: RequestAuthConfig = { type: auth.type };
+
+  if (auth.type === 'bearer' && auth.bearer) {
+    const rawToken = auth.bearer.token;
+    if (rawToken) {
+      if (rawToken.startsWith('{{') && rawToken.endsWith('}}')) {
+        // Las referencias a variables de entorno se preservan en plantillas
+        cleanAuth.bearer = { token: rawToken };
+      } else if (!isAlreadyRedacted(rawToken)) {
+        cleanAuth.bearer = { token: REDACTED_MARKER };
+        redactedCount++;
+      } else {
+        cleanAuth.bearer = { token: REDACTED_MARKER };
+      }
+    } else {
+      cleanAuth.bearer = { token: '' };
+    }
+  } else if (auth.type === 'basic' && auth.basic) {
+    const { username, password } = auth.basic;
+    let cleanPass = password;
+    if (password) {
+      if (password.startsWith('{{') && password.endsWith('}}')) {
+        cleanPass = password;
+      } else if (!isAlreadyRedacted(password)) {
+        cleanPass = REDACTED_MARKER;
+        redactedCount++;
+      } else {
+        cleanPass = REDACTED_MARKER;
+      }
+    }
+    cleanAuth.basic = {
+      username: username || '',
+      password: cleanPass || '',
+    };
+  } else if (auth.type === 'apikey' && auth.apiKey) {
+    const { key, value, addTo } = auth.apiKey;
+    let cleanVal = value;
+    if (value) {
+      if (value.startsWith('{{') && value.endsWith('}}')) {
+        cleanVal = value;
+      } else if (isSensitiveKey(key) || isSensitiveText(value) || !isAlreadyRedacted(value)) {
+        cleanVal = REDACTED_MARKER;
+        redactedCount++;
+      }
+    }
+    cleanAuth.apiKey = {
+      key: key || '',
+      value: cleanVal || '',
+      addTo: addTo || 'header',
+    };
+  }
+
+  return { sanitizedAuth: cleanAuth, redactedCount };
+}
+
+/**
  * Sanitiza una carga útil completa para almacenamiento en el historial.
  */
 export function sanitizeRequestPayload(payload: ExecuteRequestPayload): {
@@ -471,8 +538,9 @@ export function sanitizeRequestPayload(payload: ExecuteRequestPayload): {
   const { sanitizedHeaders, redactedCount: headersCount } = sanitizeHeaders(payload.headers);
   const { sanitizedParams, redactedCount: paramsCount } = sanitizeQueryParams(payload.queryParams);
   const { sanitizedBody, redactedCount: bodyCount } = sanitizeBody(payload.body);
+  const { sanitizedAuth, redactedCount: authCount } = sanitizeAuth(payload.auth);
 
-  const totalRedacted = urlCount + headersCount + paramsCount + bodyCount;
+  const totalRedacted = urlCount + headersCount + paramsCount + bodyCount + authCount;
 
   return {
     sanitized: {
@@ -481,6 +549,7 @@ export function sanitizeRequestPayload(payload: ExecuteRequestPayload): {
       headers: sanitizedHeaders,
       queryParams: sanitizedParams,
       body: sanitizedBody,
+      auth: sanitizedAuth,
     },
     redactedCount: totalRedacted,
   };
@@ -634,6 +703,13 @@ export function hasProtectedSecrets(
       const jsonStr = JSON.stringify(payload.body);
       if (jsonStr.includes(REDACTED_MARKER)) return true;
     }
+  }
+
+  if (payload.auth) {
+    if (payload.auth.bearer?.token && payload.auth.bearer.token.includes(REDACTED_MARKER)) return true;
+    if (payload.auth.basic?.password && payload.auth.basic.password.includes(REDACTED_MARKER)) return true;
+    if (payload.auth.basic?.username && payload.auth.basic.username.includes(REDACTED_MARKER)) return true;
+    if (payload.auth.apiKey?.value && payload.auth.apiKey.value.includes(REDACTED_MARKER)) return true;
   }
 
   if (result) {

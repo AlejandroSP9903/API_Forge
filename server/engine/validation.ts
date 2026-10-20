@@ -140,6 +140,30 @@ export function validateAndNormalizeRequest(definition: HttpRequestDefinition): 
     }
   }
 
+  // 5b. Incorporar autenticación HTTP si está configurada (Fase 1G)
+  if (definition.auth && definition.auth.type && definition.auth.type !== 'none') {
+    if (definition.auth.type === 'bearer' && definition.auth.bearer?.token) {
+      const trimmed = definition.auth.bearer.token.trim();
+      const bearerHeader = /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+      normalizedHeaders['Authorization'] = bearerHeader;
+    } else if (definition.auth.type === 'basic' && definition.auth.basic) {
+      const u = definition.auth.basic.username || '';
+      const p = definition.auth.basic.password || '';
+      const encoded = Buffer.from(`${u}:${p}`).toString('base64');
+      normalizedHeaders['Authorization'] = `Basic ${encoded}`;
+    } else if (definition.auth.type === 'apikey' && definition.auth.apiKey) {
+      const key = (definition.auth.apiKey.key || '').trim();
+      const val = definition.auth.apiKey.value || '';
+      if (key) {
+        if (definition.auth.apiKey.addTo === 'query') {
+          parsedUrl.searchParams.append(key, val);
+        } else {
+          normalizedHeaders[key] = val;
+        }
+      }
+    }
+  }
+
   // 6. Validar y normalizar el cuerpo de la solicitud
   let normalizedBody: string | null = null;
   const methodsAllowingBody = ['POST', 'PUT', 'PATCH', 'DELETE'];
