@@ -6,6 +6,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { config } from '../config.ts';
 import type { ApiResponseError } from '../../packages/shared/types.ts';
+import { sanitizeText } from '../../src/services/historySecurityService.ts';
 
 export class AppError extends Error {
   public readonly statusCode: number;
@@ -28,8 +29,11 @@ export function errorHandler(
   const statusCode = 'statusCode' in err && typeof err.statusCode === 'number' ? err.statusCode : 500;
   const errorCode = 'code' in err && typeof err.code === 'string' ? err.code : 'INTERNAL_SERVER_ERROR';
 
-  // Registro de error interno sin exponer datos confidenciales a la respuesta cliente
-  console.error(`[Error] [${req.method}] ${req.path} -> ${errorCode}: ${err.message}`);
+  const rawMessage = err.message || '';
+  const { sanitizedText: safeMessage } = sanitizeText(rawMessage);
+
+  // Registro de error interno sin exponer datos confidenciales, contraseñas ni credenciales Basic Auth
+  console.error(`[Error] [${req.method}] ${req.path} -> ${errorCode}: ${safeMessage}`);
 
   const isProduction = config.nodeEnv === 'production';
 
@@ -39,7 +43,7 @@ export function errorHandler(
       // En producción enmascaramos mensajes de errores genéricos 500
       message: (statusCode >= 500 && isProduction)
         ? 'Ha ocurrido un error interno en el servidor.'
-        : err.message || 'Error no especificado.',
+        : safeMessage || 'Error no especificado.',
       timestamp: new Date().toISOString(),
     },
   };

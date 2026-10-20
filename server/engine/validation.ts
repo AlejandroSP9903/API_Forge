@@ -5,6 +5,7 @@
 
 import type { HttpMethod, HttpRequestDefinition } from '../../packages/shared/types.ts';
 import { SecurityError } from './securityPolicy.ts';
+import { sanitizeUrl } from '../../src/services/historySecurityService.ts';
 
 export class ValidationError extends Error {
   public readonly code: 'INVALID_URL' | 'INVALID_REQUEST';
@@ -50,16 +51,7 @@ const MAX_REQUEST_BODY_SIZE = 1024 * 1024; // 1 MB
  */
 export function safeUrlForErrorMessage(rawUrl: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') return '';
-  // Redactar contraseñas en Basic Auth http://user:pass@host -> http://user:[VALOR_PROTEGIDO]@host
-  let safe = rawUrl.replace(/(https?:\/\/[^:]+:)([^@]+)(@)/i, '$1[VALOR_PROTEGIDO]$3');
-  // Redactar parámetros con claves sensibles en la query string
-  safe = safe.replace(/([?&])([^=]+)=([^&#]*)/g, (match, prefix, key) => {
-    if (/(token|key|secret|password|passwd|auth|sig|signature)/i.test(key)) {
-      return `${prefix}${key}=[VALOR_PROTEGIDO]`;
-    }
-    return match;
-  });
-  return safe;
+  return sanitizeUrl(rawUrl).sanitizedUrl;
 }
 
 /**

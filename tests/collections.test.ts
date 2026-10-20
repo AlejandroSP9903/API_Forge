@@ -304,4 +304,100 @@ describe('Sistema de Colecciones (Fase 1D) - Endpoints REST Express', () => {
     expect(delColRes.status).toBe(200);
     expect(delColRes.body.success).toBe(true);
   });
+
+  describe('Flujo de Guardado de Misiones y Creación con Nombre Personalizado (Bugfix)', () => {
+    it('13. cuando no hay colecciones, debe crear la colección con el nombre exacto "Pruebas API Anime" sin sustituirlo por "Colección General"', async () => {
+      // 0 colecciones iniciales
+      const initialCols = await listCollections();
+      expect(initialCols).toHaveLength(0);
+
+      // Simular guardado con nombre personalizado desde el flujo de guardado de misiones
+      const customColName = 'Pruebas API Anime';
+      const colRes = await request(app)
+        .post('/api/collections')
+        .send({ name: customColName });
+
+      expect(colRes.status).toBe(201);
+      expect(colRes.body.name).toBe('Pruebas API Anime');
+      expect(colRes.body.name).not.toBe('Colección General');
+      expect(colRes.body.name).not.toBe('Colección general');
+
+      // Guardar una misión dentro de la colección recién creada
+      const reqRes = await request(app)
+        .post(`/api/collections/${colRes.body.id}/requests`)
+        .send({
+          name: 'Obtener Lista de Animes',
+          method: 'GET',
+          url: 'https://api.jikan.moe/v4/anime',
+        });
+
+      expect(reqRes.status).toBe(201);
+      expect(reqRes.body.name).toBe('Obtener Lista de Animes');
+      expect(reqRes.body.collectionId).toBe(colRes.body.id);
+
+      // Comprobar que la misión pertenece a la colección correcta y persiste
+      const fullCol = await getCollectionById(colRes.body.id);
+      expect(fullCol).not.toBeNull();
+      expect(fullCol?.name).toBe('Pruebas API Anime');
+      expect(fullCol?.requestsCount).toBe(1);
+      expect(fullCol?.requests[0].name).toBe('Obtener Lista de Animes');
+      expect(fullCol?.requests[0].collectionId).toBe(colRes.body.id);
+    });
+
+    it('14. debe conservar el nombre personalizado "Mi colección de pruebas" de principio a fin', async () => {
+      const colRes = await request(app)
+        .post('/api/collections')
+        .send({ name: 'Mi colección de pruebas', description: 'Colección personalizada de prueba' });
+
+      expect(colRes.status).toBe(201);
+      expect(colRes.body.name).toBe('Mi colección de pruebas');
+      expect(colRes.body.description).toBe('Colección personalizada de prueba');
+
+      const full = await getCollectionById(colRes.body.id);
+      expect(full?.name).toBe('Mi colección de pruebas');
+      expect(full?.name).not.toMatch(/colecci[oó]n general/i);
+    });
+
+    it('15. debe rechazar nombres vacíos o que solo contienen espacios sin crear colecciones ficticias', async () => {
+      // Intento con espacios en blanco
+      const emptyRes = await request(app)
+        .post('/api/collections')
+        .send({ name: '     ' });
+
+      expect(emptyRes.status).toBe(400);
+      expect(emptyRes.body.error?.code).toBe('EMPTY_NAME');
+
+      // Comprobar que ninguna colección fue creada
+      const cols = await listCollections();
+      expect(cols).toHaveLength(0);
+    });
+
+    it('16. debe permitir guardar múltiples misiones en una colección existente sin duplicar la colección', async () => {
+      const col = await createCollection({ name: 'Colección Existente Estable' });
+
+      // Guardar primera misión
+      const req1 = await createSavedRequest(col.id, {
+        name: 'Misión 1',
+        method: 'GET',
+        url: 'https://api.example.com/item1',
+      });
+
+      // Guardar segunda misión
+      const req2 = await createSavedRequest(col.id, {
+        name: 'Misión 2',
+        method: 'POST',
+        url: 'https://api.example.com/item2',
+      });
+
+      expect(req1.collectionId).toBe(col.id);
+      expect(req2.collectionId).toBe(col.id);
+
+      // Comprobar que solo existe una colección y no se duplicó
+      const allCols = await listCollections();
+      expect(allCols).toHaveLength(1);
+      expect(allCols[0].id).toBe(col.id);
+      expect(allCols[0].name).toBe('Colección Existente Estable');
+      expect(allCols[0].requestsCount).toBe(2);
+    });
+  });
 });

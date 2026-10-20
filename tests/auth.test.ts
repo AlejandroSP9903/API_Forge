@@ -8,9 +8,10 @@
  * Así como la redacción de seguridad en historial y la persistencia en colecciones SQLite.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
+import type { Request, Response } from 'express';
 import { HttpEngine } from '../server/engine/httpEngine.ts';
 import {
   formatBearerToken,
@@ -20,8 +21,11 @@ import {
   sanitizeAuth,
   sanitizeRequestPayload,
   hasProtectedSecrets,
+  sanitizeText,
+  tryDecodeBasicAuthBase64,
   REDACTED_MARKER,
 } from '../src/services/historySecurityService.ts';
+import { errorHandler } from '../server/middleware/errorHandler.ts';
 import {
   interpolateRequest,
 } from '../src/services/environmentService.ts';
@@ -406,6 +410,211 @@ describe('FASE 1G: Sistema de Autenticación HTTP', () => {
       expect(updated.auth?.type).toBe('apikey');
       expect(updated.auth?.apiKey?.key).toBe('X-API-Key');
       expect(updated.auth?.apiKey?.addTo).toBe('header');
+    });
+  });
+
+  describe('7. Auditoría de Seguridad de Basic Auth (Fase 1G-R)', () => {
+    it('debe ejecutar una solicitud Basic Auth exitosamente con credenciales ficticias', async () => {
+      const fictitiousUser = 'hunter_demo_user';
+      const fictitiousPass = 'shadow_key_secret_777';
+      const expectedBase64 = Buffer.from(`${fictitiousUser}:${fictitiousPass}`).toString('base64');
+
+      const result = await testEngine.execute({
+        url: `${baseUrl}/auth-inspect`,
+        method: 'GET',
+        auth: {
+          type: 'basic',
+          basic: {
+            username: fictitiousUser,
+            password: fictitiousPass,
+          },
+        },
+      });
+
+      expect(result.success).toBe(true);
+      const data = result.response?.data as { headers: Record<string, string> };
+      expect(data.headers['authorization']).toBe(`Basic ${expectedBase64}`);
+    });
+
+    it('debe asegurar que el encabezado Authorization: Basic no aparezca sin redactar en el historial', () => {
+      const fictitiousUser = 'demo_hunter';
+      const fictitiousPass = 'fictitious_password_999';
+      const rawBase64 = Buffer.from(`${fictitiousUser}:${fictitiousPass}`).toString('base64');
+
+      const payload: ExecuteRequestPayload = {
+        url: 'https://api.example.com/protected',
+        method: 'GET',
+        headers: {
+          'Authorization': `Basic ${rawBase64}`,
+          'Accept': 'application/json',
+        },
+        auth: {
+          type: 'basic',
+          basic: {
+            username: fictitiousUser,
+            password: fictitiousPass,
+          },
+        },
+      };
+
+      const { sanitized, redactedCount } = sanitizeRequestPayload(payload);
+
+      // Redacción obligatoria en cabeceras
+      expect(sanitized.headers?.['Authorization']).toBe(REDACTED_MARKER);
+      // Redacción obligatoria en auth config
+      expect(sanitized.auth?.basic?.password).toBe(REDACTED_MARKER);
+      // El usuario se conserva si no es una clave sensible
+      expect(sanitized.auth?.basic?.username).toBe(fictitiousUser);
+      expect(redactedCount).toBeGreaterThanOrEqual(2);
+
+      // Verificar que ni la contraseña plana ni el valor Base64 existan en el payload sanitizado serializado
+      const serialized = JSON.stringify(sanitized);
+      expect(serialized).not.toContain(fictitiousPass);
+      expect(serialized).not.toContain(rawBase64);
+    });
+
+    it('no debe registrar contraseñas ni el valor Base64 de Basic Auth en los logs del backend', () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const fictitiousUser = 'agent_audit';
+      const fictitiousPass = 'super_secret_audit_pwd';
+      const rawBase64 = Buffer.from(`${fictitiousUser}:${fictitiousPass}`).toString('base64');
+
+      const mockReq = {
+        method: 'POST',
+        path: '/api/requests/execute',
+      } as Request;
+
+      let capturedResponse: unknown = null;
+      const mockRes = {
+        status: vi.fn().mockReturnThis(),
+        json: vi.fn().mockImplementation((val) => {
+          capturedResponse = val;
+        }),
+      } as unknown as Response;
+
+      const mockNext = vi.fn();
+
+      const sensitiveError = new Error(
+        `Fallo al autenticar Authorization: Basic ${rawBase64} para usuario ${fictitiousUser} con password ${fictitiousPass}`
+      );
+
+      errorHandler(sensitiveError, mockReq, mockRes, mockNext);
+
+      // Verificar que console.error fue llamado pero SIN contraseñas ni Base64
+      expect(consoleErrorSpy).toHaveBeenCalled();
+      const loggedMessage = consoleErrorSpy.mock.calls[0].join(' ');
+
+      expect(loggedMessage).not.toContain(fictitiousPass);
+      expect(loggedMessage).not.toContain(rawBase64);
+      expect(loggedMessage).toContain(REDACTED_MARKER);
+
+      // Verificar que la respuesta enviada al cliente tampoco contenga las credenciales
+      const responseStr = JSON.stringify(capturedResponse);
+      expect(responseStr).not.toContain(fictitiousPass);
+      expect(responseStr).not.toContain(rawBase64);
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('no debe incluir el valor Base64 ni contraseñas en mensajes de error del motor HTTP', async () => {
+      const fictitiousUser = 'invalid_user';
+      const fictitiousPass = 'fictitious_secret_pass_888';
+
+      // 1. Error de URL con Basic Auth incrustado
+      const invalidUrlResult = await testEngine.execute({
+        url: `http://${fictitiousUser}:${fictitiousPass}@999.999.999.999:9999/test`,
+        method: 'GET',
+      });
+
+      expect(invalidUrlResult.success).toBe(false);
+      expect(invalidUrlResult.error?.message).not.toContain(fictitiousPass);
+      expect(invalidUrlResult.error?.message).toContain(REDACTED_MARKER);
+
+      // 2. Sanitizador de texto con token Base64 independiente (RFC 7617)
+      const rawBase64 = Buffer.from(`${fictitiousUser}:${fictitiousPass}`).toString('base64');
+      const rawErrorText = `Error de conexión: credenciales 'Basic ${rawBase64}' rechazadas por el servidor.`;
+      const { sanitizedText } = sanitizeText(rawErrorText);
+
+      expect(sanitizedText).not.toContain(fictitiousPass);
+      expect(sanitizedText).not.toContain(rawBase64);
+      expect(sanitizedText).toContain(REDACTED_MARKER);
+
+      // 3. Verificación de tryDecodeBasicAuthBase64
+      expect(tryDecodeBasicAuthBase64(rawBase64)).toBe(true);
+      expect(tryDecodeBasicAuthBase64('palabraComun')).toBe(false);
+    });
+
+    it('debe recuperar solicitudes con Basic Auth desde colecciones sin exponer contraseñas pero preservando variables', async () => {
+      const col = await createCollection({ name: 'Colección Basic Auth Segura' });
+
+      // Caso A: Solicitud guardada con contraseña plana sensible
+      const savedPlain = await createSavedRequest(col.id, {
+        name: 'Misión Con Password Plano',
+        method: 'GET',
+        url: 'https://api.example.com/vault',
+        auth: {
+          type: 'basic',
+          basic: {
+            username: 'hunter_plain',
+            password: 'plano_inseguro_password_123',
+          },
+        },
+      });
+
+      // La contraseña debe persistirse redactada
+      expect(savedPlain.auth?.basic?.password).toBe(REDACTED_MARKER);
+      expect(savedPlain.hasProtectedSecrets).toBe(true);
+
+      // Caso B: Solicitud guardada con variables de entorno {{USER}} y {{PASS}}
+      const savedWithVars = await createSavedRequest(col.id, {
+        name: 'Misión Con Variables',
+        method: 'POST',
+        url: 'https://api.example.com/login',
+        auth: {
+          type: 'basic',
+          basic: {
+            username: '{{HUNTER_USER}}',
+            password: '{{HUNTER_PASS}}',
+          },
+        },
+      });
+
+      // Las variables deben preservarse intactas en la base de datos
+      expect(savedWithVars.auth?.basic?.username).toBe('{{HUNTER_USER}}');
+      expect(savedWithVars.auth?.basic?.password).toBe('{{HUNTER_PASS}}');
+
+      // Recuperar la colección y verificar que ambas solicitudes cargan limpiamente
+      const retrievedCol = await getCollectionById(col.id);
+      expect(retrievedCol?.requests).toHaveLength(2);
+
+      const retrievedPlain = retrievedCol?.requests.find((r) => r.id === savedPlain.id);
+      expect(retrievedPlain?.auth?.basic?.password).toBe(REDACTED_MARKER);
+
+      const retrievedVars = retrievedCol?.requests.find((r) => r.id === savedWithVars.id);
+      expect(retrievedVars?.auth?.basic?.username).toBe('{{HUNTER_USER}}');
+      expect(retrievedVars?.auth?.basic?.password).toBe('{{HUNTER_PASS}}');
+    });
+
+    it('debe asegurar que las solicitudes antiguas sin autenticación sigan funcionando sin regresiones', async () => {
+      const col = await createCollection({ name: 'Colección Legacy' });
+
+      const legacyReq = await createSavedRequest(col.id, {
+        name: 'Misión Antigua Sin Auth',
+        method: 'GET',
+        url: `${baseUrl}/auth-inspect`,
+      });
+
+      expect(legacyReq.auth).toBeUndefined();
+
+      const execResult = await testEngine.execute({
+        url: legacyReq.url,
+        method: legacyReq.method,
+      });
+
+      expect(execResult.success).toBe(true);
+      const data = execResult.response?.data as { headers: Record<string, string> };
+      expect(data.headers['authorization']).toBeUndefined();
     });
   });
 });

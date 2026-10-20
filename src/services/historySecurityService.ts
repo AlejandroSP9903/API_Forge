@@ -14,8 +14,8 @@ const SENSITIVE_HEADER_EXACT_REGEX = /^(authorization|proxy-authorization|cookie
 const SENSITIVE_HEADER_PARTIAL_REGEX = /(auth|token|secret|password|passwd|credential|apikey|api_key|cookie|signature|sig|session|bearer|jwt)/i;
 
 // Patrones de claves sensibles en parámetros de consulta y cuerpos JSON
-const SENSITIVE_KEY_EXACT_REGEX = /^(key|token|auth|secret|password|passwd|pwd|passcode|credential|sig|signature|sign|access_token|refresh_token|id_token|client_secret|api_key|apikey|session|session_id|sessionid|jwt|bearer)$/i;
-const SENSITIVE_KEY_SUBSTRING_REGEX = /(password|passwd|passcode|secret|token|credential|apikey|api_key|signature|sig|private[_-]?key)/i;
+const SENSITIVE_KEY_EXACT_REGEX = /^(key|token|auth|authorization|proxy-authorization|secret|password|passwd|pwd|passcode|credential|sig|signature|sign|access_token|refresh_token|id_token|client_secret|api_key|apikey|session|session_id|sessionid|jwt|bearer)$/i;
+const SENSITIVE_KEY_SUBSTRING_REGEX = /(password|passwd|passcode|secret|token|credential|apikey|api_key|signature|sig|private[_-]?key|authorization)/i;
 
 /**
  * Función auxiliar para verificar si un valor ya ha sido redactado.
@@ -27,6 +27,53 @@ export function isAlreadyRedacted(val: unknown): boolean {
     val === '%5BVALOR_PROTEGIDO%5D' ||
     decodeURIComponent(val) === REDACTED_MARKER
   );
+}
+
+/**
+ * Determina si una cadena es o contiene una referencia a variable de entorno (ej. {{VARIABLE}}).
+ */
+export function isVariableReference(val?: string | null): boolean {
+  if (!val || typeof val !== 'string') return false;
+  return /\{\{\s*[a-zA-Z0-9_\-.]+\s*\}\}/.test(val);
+}
+
+/**
+ * Detecta si una cadena Base64 contiene credenciales Basic Auth según RFC 7617 (usuario:contraseña).
+ * Permite evitar fugas de contraseñas codificadas en Base64 en errores, logs o historial.
+ */
+export function tryDecodeBasicAuthBase64(candidate: string): boolean {
+  if (!candidate || candidate.length < 8 || candidate.length % 4 !== 0) return false;
+  if (candidate.includes(REDACTED_MARKER)) return false;
+
+  try {
+    let decoded = '';
+    if (typeof Buffer !== 'undefined') {
+      decoded = Buffer.from(candidate, 'base64').toString('utf8');
+      if (Buffer.from(decoded, 'utf8').toString('base64') !== candidate) {
+        return false;
+      }
+    } else if (typeof atob === 'function') {
+      decoded = atob(candidate);
+      if (btoa(decoded) !== candidate) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+
+    // Excluir si parece un bloque JSON u objeto serializado
+    if (decoded.startsWith('{') || decoded.startsWith('[')) return false;
+
+    // Comprobar formato usuario:contraseña (RFC 7617)
+    const colonIndex = decoded.indexOf(':');
+    if (colonIndex > 0 && colonIndex < decoded.length - 1) {
+      // Debe ser texto ASCII imprimible
+      return /^[\x20-\x7E]+$/.test(decoded);
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -60,6 +107,9 @@ export function isSensitiveText(text: string): boolean {
 
   // 1. Bearer Token
   if (/bearer\s+[A-Za-z0-9._~+/=-]+/i.test(text)) return true;
+
+  // 1b. Basic Auth Token (Basic <base64>)
+  if (/basic\s+[A-Za-z0-9+/=]{4,}/i.test(text)) return true;
 
   // 2. JWT Token (formato eyJ...)
   if (/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/.test(text)) return true;
@@ -103,6 +153,23 @@ export function sanitizeText(text: string): { sanitizedText: string; redactedCou
     return `${prefix}${REDACTED_MARKER}`;
   });
 
+  // 2b. Basic Auth tokens: Basic <base64>
+  const basicAuthRegex = /(authorization:\s*basic\s+|basic\s+|basic:\s*|basic_auth:\s*)(?!\[VALOR_PROTEGIDO\])[A-Za-z0-9+/=]{4,}/gi;
+  modified = modified.replace(basicAuthRegex, (match, prefix) => {
+    redactedCount++;
+    return `${prefix}${REDACTED_MARKER}`;
+  });
+
+  // 2c. Credenciales Basic Auth en Base64 independiente (RFC 7617, decodifica a usuario:contraseña)
+  const base64CandidateRegex = /\b[A-Za-z0-9+/]{8,}={0,2}\b/g;
+  modified = modified.replace(base64CandidateRegex, (candidate) => {
+    if (!isAlreadyRedacted(candidate) && tryDecodeBasicAuthBase64(candidate)) {
+      redactedCount++;
+      return REDACTED_MARKER;
+    }
+    return candidate;
+  });
+
   // 3. Tokens JWT (eyJ...)
   const jwtRegex = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b/g;
   modified = modified.replace(jwtRegex, (match) => {
@@ -133,12 +200,22 @@ export function sanitizeText(text: string): { sanitizedText: string; redactedCou
     return match;
   });
 
-  // 6. Parámetros de consulta o pares clave=valor en texto plano
-  const keyValueRegex = /(?<=[?&;,\s([{]|^)(password|passwd|secret|token|access_token|refresh_token|api_key|apikey|client_secret|signature|sig)=([^&\s"';,\n\r)]+)/gi;
+  // 6. Parámetros de consulta o pares clave=valor en texto plano (form-urlencoded / query strings)
+  const keyValueRegex = /(?<=[?&;,\s([{]|^)(authorization|password|passwd|contrase[ñn]a|secret|token|access_token|refresh_token|api_key|apikey|client_secret|signature|sig)=([^&\s"';,\n\r)]+)/gi;
   modified = modified.replace(keyValueRegex, (match, key, val) => {
     if (!isAlreadyRedacted(val)) {
       redactedCount++;
       return `${key}=${REDACTED_MARKER}`;
+    }
+    return match;
+  });
+
+  // 7. Contraseñas libres en texto descriptivo o logs (password: secret o password secret)
+  const textPasswordRegex = /(?<=\b)(password|passwd|contrase[ñn]a)(\s*:\s*|\s+)(?!\[VALOR_PROTEGIDO\])([^\s"';,\n\r)]+)/gi;
+  modified = modified.replace(textPasswordRegex, (match, key, sep, val) => {
+    if (!isAlreadyRedacted(val)) {
+      redactedCount++;
+      return `${key}${sep}${REDACTED_MARKER}`;
     }
     return match;
   });
@@ -470,7 +547,7 @@ export function sanitizeAuth(
   if (auth.type === 'bearer' && auth.bearer) {
     const rawToken = auth.bearer.token;
     if (rawToken) {
-      if (rawToken.startsWith('{{') && rawToken.endsWith('}}')) {
+      if (isVariableReference(rawToken)) {
         // Las referencias a variables de entorno se preservan en plantillas
         cleanAuth.bearer = { token: rawToken };
       } else if (!isAlreadyRedacted(rawToken)) {
@@ -486,7 +563,7 @@ export function sanitizeAuth(
     const { username, password } = auth.basic;
     let cleanPass = password;
     if (password) {
-      if (password.startsWith('{{') && password.endsWith('}}')) {
+      if (isVariableReference(password)) {
         cleanPass = password;
       } else if (!isAlreadyRedacted(password)) {
         cleanPass = REDACTED_MARKER;
@@ -495,15 +572,24 @@ export function sanitizeAuth(
         cleanPass = REDACTED_MARKER;
       }
     }
+    let cleanUser = username;
+    if (username) {
+      if (isVariableReference(username)) {
+        cleanUser = username;
+      } else if (isSensitiveKey(username) || isSensitiveText(username) || isAlreadyRedacted(username)) {
+        cleanUser = REDACTED_MARKER;
+        redactedCount++;
+      }
+    }
     cleanAuth.basic = {
-      username: username || '',
+      username: cleanUser || '',
       password: cleanPass || '',
     };
   } else if (auth.type === 'apikey' && auth.apiKey) {
     const { key, value, addTo } = auth.apiKey;
     let cleanVal = value;
     if (value) {
-      if (value.startsWith('{{') && value.endsWith('}}')) {
+      if (isVariableReference(value)) {
         cleanVal = value;
       } else if (isSensitiveKey(key) || isSensitiveText(value) || !isAlreadyRedacted(value)) {
         cleanVal = REDACTED_MARKER;

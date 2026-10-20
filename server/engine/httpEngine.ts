@@ -10,6 +10,7 @@ import { performance } from 'perf_hooks';
 import { SecurityPolicy, SecurityError, defaultSecurityPolicy, type SecurityPolicyOptions } from './securityPolicy.ts';
 import { validateAndNormalizeRequest, ValidationError, type NormalizedHttpRequest } from './validation.ts';
 import { normalizeResponse } from './responseNormalizer.ts';
+import { sanitizeText, sanitizeBody } from '../../src/services/historySecurityService.ts';
 import type {
   HttpRequestDefinition,
   ExecuteRequestResult,
@@ -87,12 +88,21 @@ export class HttpEngine {
         message = 'La solicitud fue cancelada por el cliente o excedió el tiempo límite.';
       }
 
+      // Sanitizar el mensaje de error y los detalles para prevenir fugas de credenciales o Base64
+      const { sanitizedText: safeErrorMessage } = sanitizeText(message);
+      let safeDetails = details;
+      if (typeof details === 'string') {
+        safeDetails = sanitizeText(details).sanitizedText;
+      } else if (details && typeof details === 'object') {
+        safeDetails = sanitizeBody(details as object).sanitizedBody;
+      }
+
       return {
         success: false,
         error: {
           code,
-          message,
-          details,
+          message: safeErrorMessage,
+          details: safeDetails,
         },
         timing: {
           durationMs,

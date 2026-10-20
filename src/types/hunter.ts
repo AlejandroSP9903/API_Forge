@@ -26,4 +26,4 @@ export interface MissionHistoryItem {
   hasProtectedSecrets?: boolean;
 }
 
-export type ActiveNavTab = 'builder' | 'collections' | 'environments' | 'monitor' | 'archive' | 'settings';
+export type ActiveNavTab = 'builder' | 'projects' | 'collections' | 'environments' | 'monitor' | 'archive' | 'settings';

@@ -16,6 +16,7 @@ import {
   Layers,
   Sliders,
   FolderArchive,
+  FolderKanban,
   Globe,
 } from 'lucide-react';
 import type { ActiveNavTab } from '../types/hunter.ts';
@@ -26,6 +27,7 @@ interface SidebarProps {
   onTabChange: (tab: ActiveNavTab) => void;
   healthData: HealthCheckResponse | null;
   historyCount: number;
+  projectsCount?: number;
   collectionsCount?: number;
   environmentsCount?: number;
   clientPingMs: number | null;
@@ -37,6 +39,7 @@ export function Sidebar({
   onTabChange,
   healthData,
   historyCount,
+  projectsCount = 0,
   collectionsCount = 0,
   environmentsCount = 0,
   clientPingMs,
@@ -84,7 +87,7 @@ export function Sidebar({
           <div className="text-right">
             <div className="text-[10px] font-mono text-cyan-400/70 uppercase">Nivel Sistema</div>
             <div className="text-xs font-extrabold text-purple-400 font-mono tracking-wider">
-              FASE 1E
+              FASE 2A
             </div>
           </div>
         </div>
@@ -110,6 +113,28 @@ export function Sidebar({
             <span>REQUEST BUILDER</span>
           </div>
           <span className="text-[10px] font-mono text-cyan-400/60">[QUEST]</span>
+        </button>
+
+        {/* 2. Projects (Fase 2A) */}
+        <button
+          onClick={() => onTabChange('projects')}
+          className={`w-full text-left px-3.5 py-2.5 rounded-lg text-xs font-semibold flex items-center justify-between transition group relative ${
+            activeTab === 'projects'
+              ? 'bg-gradient-to-r from-cyan-950/60 to-indigo-950/40 border border-cyan-500/40 text-cyan-300 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            <FolderKanban className={`h-4 w-4 ${activeTab === 'projects' ? 'text-cyan-400' : 'text-slate-500 group-hover:text-cyan-400'}`} />
+            <span>PROYECTOS</span>
+          </div>
+          {projectsCount > 0 ? (
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+              {projectsCount}
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono text-cyan-400/60">[PROJECTS]</span>
+          )}
         </button>
 
         {/* 2. Collections (Fase 1D) */}

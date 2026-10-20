@@ -8,6 +8,7 @@ import { healthRouter } from './routes/health.ts';
 import { requestsRouter } from './routes/requests.ts';
 import { collectionsRouter } from './routes/collections.ts';
 import { environmentsRouter } from './routes/environments.ts';
+import { projectsRouter } from './routes/projects.ts';
 import { errorHandler } from './middleware/errorHandler.ts';
 
 export function createApp(): Express {
@@ -19,6 +20,7 @@ export function createApp(): Express {
   // Rutas de API bajo el prefijo /api
   app.use('/api', healthRouter);
   app.use('/api/requests', requestsRouter);
+  app.use('/api/projects', projectsRouter);
   app.use('/api/collections', collectionsRouter);
   app.use('/api/environments', environmentsRouter);
 

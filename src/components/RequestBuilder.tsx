@@ -45,7 +45,7 @@ import type {
 } from '../../packages/shared/types.ts';
 import type { KeyValueItem } from '../types/hunter.ts';
 import { playSound } from '../services/audioService.ts';
-import { hasProtectedSecrets, sanitizeText, isSensitiveHeader } from '../services/historySecurityService.ts';
+import { hasProtectedSecrets, sanitizeText, isSensitiveHeader, isVariableReference } from '../services/historySecurityService.ts';
 import {
   interpolateRequest,
   interpolateString,
@@ -1322,13 +1322,26 @@ export function RequestBuilder({
 
                 {/* Previsualización en tiempo real del encabezado Basic */}
                 <div className="p-3 rounded-lg bg-black/40 border border-slate-800/80 text-[11px] font-mono space-y-1">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">// Encabezado HTTP que se generará:</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">// Encabezado HTTP que se generará:</span>
+                    {!showBasicPassword && authConfig.basic?.password && !isVariableReference(authConfig.basic.password) && (
+                      <span className="text-[10px] text-amber-400/80 font-mono">// Contraseña enmascarada en vista previa</span>
+                    )}
+                  </div>
                   <div className="text-cyan-300 flex items-center gap-2 overflow-x-auto">
                     <span className="text-slate-400 font-bold">Authorization:</span>
                     <span>
-                      {authConfig.basic?.username || authConfig.basic?.password
-                        ? `Basic ${encodeBasicAuth(authConfig.basic.username || '', authConfig.basic.password || '')}`
-                        : '<Basic base64(usuario:contraseña)>'}
+                      {authConfig.basic?.username || authConfig.basic?.password ? (
+                        showBasicPassword ? (
+                          `Basic ${encodeBasicAuth(authConfig.basic.username || '', authConfig.basic.password || '')}`
+                        ) : isVariableReference(authConfig.basic.password || '') ? (
+                          `Basic <base64(${authConfig.basic.username || 'usuario'}:${authConfig.basic.password})>`
+                        ) : (
+                          `Basic <base64(${authConfig.basic.username || 'usuario'}:••••••••)>`
+                        )
+                      ) : (
+                        '<Basic base64(usuario:contraseña)>'
+                      )}
                     </span>
                   </div>
                 </div>

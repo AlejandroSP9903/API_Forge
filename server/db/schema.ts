@@ -13,6 +13,7 @@ export const projects = sqliteTable('projects', {
   name: text('name').notNull(),
   description: text('description'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp' }),
 });
 
 /**
@@ -56,11 +57,13 @@ export type NewHealthAuditLog = typeof healthAuditLogs.$inferInsert;
 
 /**
  * Tabla de Colecciones de Solicitudes
+ * Puede asociarse opcionalmente a un Proyecto (Fase 2A)
  */
 export const collections = sqliteTable('collections', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   description: text('description'),
+  projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
 });

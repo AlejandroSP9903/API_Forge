@@ -52,6 +52,7 @@ interface CollectionsPanelProps {
   onLoadIntoBuilder: (payload: ExecuteRequestPayload) => void;
   onNavigateToBuilder: () => void;
   onCollectionsCountChange?: (count: number) => void;
+  initialSelectedCollectionId?: string | null;
 }
 
 const METHOD_COLORS: Record<HttpMethod, { text: string; bg: string; border: string }> = {
@@ -67,6 +68,7 @@ export function CollectionsPanel({
   onLoadIntoBuilder,
   onNavigateToBuilder,
   onCollectionsCountChange,
+  initialSelectedCollectionId,
 }: CollectionsPanelProps) {
   // Lista de colecciones
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
@@ -76,7 +78,15 @@ export function CollectionsPanel({
   const [searchTerm, setSearchTerm] = useState<string>('');
 
   // Colección seleccionada para inspección
-  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null);
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(
+    initialSelectedCollectionId || null
+  );
+
+  useEffect(() => {
+    if (initialSelectedCollectionId) {
+      setSelectedCollectionId(initialSelectedCollectionId);
+    }
+  }, [initialSelectedCollectionId]);
   const [selectedCollection, setSelectedCollection] = useState<CollectionWithRequests | null>(null);
   const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
 

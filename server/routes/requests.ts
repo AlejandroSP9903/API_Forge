@@ -66,6 +66,7 @@ requestsRouter.post('/execute', async (req: Request, res: Response, next: NextFu
       headers: payload.headers,
       queryParams: payload.queryParams,
       body: payload.body,
+      auth: payload.auth,
       timeoutMs: payload.timeoutMs,
       maxResponseSizeBytes: payload.maxResponseSizeBytes,
       maxRedirects: payload.maxRedirects,

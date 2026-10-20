@@ -161,6 +161,7 @@ export interface CollectionSummary {
   id: string;
   name: string;
   description?: string | null;
+  projectId?: string | null;
   createdAt: string;
   updatedAt: string;
   requestsCount: number;
@@ -178,6 +179,37 @@ export interface CreateCollectionPayload {
 export interface UpdateCollectionPayload {
   name?: string;
   description?: string;
+}
+
+/* ==========================================================================
+ * FASE 2A: CONTRATO DEL SISTEMA DE PROYECTOS (PROJECTS SYSTEM)
+ * ========================================================================== */
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  collectionsCount?: number;
+}
+
+export interface ProjectWithCollections extends ProjectSummary {
+  collections: CollectionSummary[];
+}
+
+export interface CreateProjectPayload {
+  name: string;
+  description?: string;
+}
+
+export interface UpdateProjectPayload {
+  name?: string;
+  description?: string;
+}
+
+export interface AssociateCollectionPayload {
+  collectionId: string;
 }
 
 export interface CreateSavedRequestPayload {

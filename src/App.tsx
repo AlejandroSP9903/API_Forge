@@ -44,6 +44,7 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { RequestBuilder } from './components/RequestBuilder.tsx';
+import { ProjectsPanel } from './components/ProjectsPanel.tsx';
 import { CollectionsPanel } from './components/CollectionsPanel.tsx';
 import { EnvironmentsPanel } from './components/EnvironmentsPanel.tsx';
 import { AudioSettingsPanel } from './components/AudioSettingsPanel.tsx';
@@ -71,6 +72,9 @@ import {
   hasProtectedSecrets,
   REDACTED_MARKER,
 } from './services/historySecurityService.ts';
+import {
+  fetchProjects,
+} from './services/projectsService.ts';
 import {
   fetchCollections,
   createCollectionApi,
@@ -129,6 +133,23 @@ export default function App() {
   // Mensaje temporal de migración o auditoría manual
   const [securityAuditMessage, setSecurityAuditMessage] = useState<string | null>(null);
 
+  // Estado de Proyectos SQLite (Fase 2A)
+  const [projectsCount, setProjectsCount] = useState<number>(0);
+  const [selectedCollectionForPanel, setSelectedCollectionForPanel] = useState<string | null>(null);
+
+  const refreshProjectsCount = useCallback(async () => {
+    try {
+      const projs = await fetchProjects();
+      setProjectsCount(projs.length);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshProjectsCount();
+  }, [refreshProjectsCount]);
+
   // Estado de Colecciones SQLite (Fase 1D)
   const [collectionsCount, setCollectionsCount] = useState<number>(0);
   const [currentBuilderPayload, setCurrentBuilderPayload] = useState<ExecuteRequestPayload | null>(null);
@@ -139,6 +160,7 @@ export default function App() {
   const [quickSaveNewColName, setQuickSaveNewColName] = useState<string>('');
   const [quickSaveReqName, setQuickSaveReqName] = useState<string>('');
   const [quickSavePayload, setQuickSavePayload] = useState<ExecuteRequestPayload | null>(null);
+  const [quickSaveError, setQuickSaveError] = useState<string | null>(null);
 
   // Estado de Entornos y Variables (Fase 1E)
   const [environmentsCount, setEnvironmentsCount] = useState<number>(0);
@@ -216,6 +238,9 @@ export default function App() {
     setQuickSavePayload(payload);
     const defaultName = `Misión ${payload.method || 'GET'} - ${payload.url.split('/').filter(Boolean).pop() || 'Endpoint'}`;
     setQuickSaveReqName(defaultName);
+    setQuickSaveIsNewCol(availableCollections.length === 0);
+    setQuickSaveNewColName('');
+    setQuickSaveError(null);
     setIsQuickSaveModalOpen(true);
     refreshCollectionsCount();
   };
@@ -223,42 +248,71 @@ export default function App() {
   // Ejecutar guardado rápido en colección SQLite
   const handleExecuteQuickSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quickSavePayload || !quickSaveReqName.trim()) return;
+    setQuickSaveError(null);
+    if (!quickSavePayload) return;
+
+    const trimmedReqName = quickSaveReqName.trim();
+    if (!trimmedReqName) {
+      setQuickSaveError('El nombre descriptivo de la misión es obligatorio.');
+      playSound('requestError');
+      return;
+    }
+
+    // Determinar si corresponde crear una nueva colección
+    const isCreatingNewCol = quickSaveIsNewCol || availableCollections.length === 0;
 
     try {
       let targetId = quickSaveTargetColId;
-      if (quickSaveIsNewCol) {
-        if (!quickSaveNewColName.trim()) return;
-        const newCol = await createCollectionApi({ name: quickSaveNewColName.trim() });
-        targetId = newCol.id;
-      } else if (!targetId && availableCollections.length > 0) {
-        targetId = availableCollections[0].id;
-      }
 
-      if (!targetId) {
-        const defaultCol = await createCollectionApi({ name: 'Colección General' });
-        targetId = defaultCol.id;
+      if (isCreatingNewCol) {
+        const trimmedColName = quickSaveNewColName.trim();
+        if (!trimmedColName) {
+          setQuickSaveError('El nombre de la nueva colección es obligatorio y no puede estar vacío.');
+          playSound('requestError');
+          return;
+        }
+        // Crear la nueva colección con el nombre exacto especificado por el usuario
+        const newCol = await createCollectionApi({ name: trimmedColName });
+        targetId = newCol.id;
+      } else {
+        // Usar la colección seleccionada
+        if (!targetId && availableCollections.length > 0) {
+          targetId = availableCollections[0].id;
+        }
+        if (!targetId) {
+          const trimmedColName = quickSaveNewColName.trim();
+          if (!trimmedColName) {
+            setQuickSaveError('Debes seleccionar o especificar un nombre para la colección.');
+            playSound('requestError');
+            return;
+          }
+          const newCol = await createCollectionApi({ name: trimmedColName });
+          targetId = newCol.id;
+        }
       }
 
       await createSavedRequestApi(targetId, {
-        name: quickSaveReqName.trim(),
+        name: trimmedReqName,
         method: quickSavePayload.method || 'GET',
         url: quickSavePayload.url,
         headers: quickSavePayload.headers,
         queryParams: quickSavePayload.queryParams,
         body: quickSavePayload.body,
+        auth: quickSavePayload.auth,
       });
 
       playSound('requestSuccess');
-      setSecurityAuditMessage(`Solicitud '${quickSaveReqName.trim()}' guardada exitosamente en la colección.`);
+      setSecurityAuditMessage(`Solicitud '${trimmedReqName}' guardada exitosamente en la colección.`);
       setTimeout(() => setSecurityAuditMessage(null), 4000);
       setIsQuickSaveModalOpen(false);
       setQuickSaveNewColName('');
       setQuickSaveIsNewCol(false);
+      setQuickSaveError(null);
       await refreshCollectionsCount();
     } catch (err) {
       playSound('requestError');
-      setHealthError(err instanceof Error ? err.message : 'Error al guardar la solicitud en la colección.');
+      const msg = err instanceof Error ? err.message : 'Error al guardar la solicitud en la colección.';
+      setQuickSaveError(msg);
     }
   };
 
@@ -485,6 +539,7 @@ export default function App() {
         onTabChange={setActiveTab}
         healthData={healthData}
         historyCount={history.length}
+        projectsCount={projectsCount}
         collectionsCount={collectionsCount}
         environmentsCount={environmentsCount}
         clientPingMs={clientPingMs}
@@ -501,6 +556,7 @@ export default function App() {
               <span>SISTEMA //</span>
               <span className="text-white font-bold tracking-wider">
                 {activeTab === 'builder' && 'REQUEST BUILDER CONSOLE'}
+                {activeTab === 'projects' && 'PROJECTS & WORKSPACES // SQLITE MANAGER'}
                 {activeTab === 'collections' && 'COLLECTIONS SYSTEM // SQLITE LIBRARY'}
                 {activeTab === 'environments' && 'ENVIRONMENTS & VARIABLES // SYSTEM ENGINE'}
                 {activeTab === 'monitor' && 'SYSTEM DIAGNOSTICS & STATUS'}
@@ -641,10 +697,22 @@ export default function App() {
             </div>
           )}
 
+          {/* TAB: PROYECTOS (FASE 2A) */}
+          {activeTab === 'projects' && (
+            <ProjectsPanel
+              onOpenCollection={(colId) => {
+                setSelectedCollectionForPanel(colId);
+                setActiveTab('collections');
+              }}
+              onProjectsCountChange={setProjectsCount}
+            />
+          )}
+
           {/* TAB: COLECCIONES (FASE 1D) */}
           {activeTab === 'collections' && (
             <CollectionsPanel
               currentBuilderPayload={currentBuilderPayload}
+              initialSelectedCollectionId={selectedCollectionForPanel}
               onLoadIntoBuilder={(payload) => {
                 setSelectedPayloadForBuilder(payload);
                 setActiveTab('builder');
@@ -1216,6 +1284,14 @@ export default function App() {
               </div>
 
               <form onSubmit={handleExecuteQuickSave} className="space-y-4">
+                {/* Mensaje de error específico del guardado rápido */}
+                {quickSaveError && (
+                  <div className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-500/40 text-xs text-rose-300 font-mono flex items-center gap-2 animate-fadeIn">
+                    <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+                    <span>{quickSaveError}</span>
+                  </div>
+                )}
+
                 {/* Resumen de la Solicitud actual */}
                 <div className="p-3 rounded-lg bg-[#050811] border border-cyan-500/20 space-y-1 text-xs font-mono">
                   <div className="flex items-center gap-2">
@@ -1235,8 +1311,12 @@ export default function App() {
                   <input
                     type="text"
                     value={quickSaveReqName}
-                    onChange={(e) => setQuickSaveReqName(e.target.value)}
+                    onChange={(e) => {
+                      setQuickSaveReqName(e.target.value);
+                      if (quickSaveError) setQuickSaveError(null);
+                    }}
                     required
+                    maxLength={100}
                     autoFocus
                     placeholder="Ej: Login de Usuario, Obtener Productos..."
                     className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-cyan-500/30 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
@@ -1247,24 +1327,37 @@ export default function App() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[11px] font-mono text-cyan-400 uppercase">
-                      Colección Destino
+                      Colección Destino <span className="text-rose-400">*</span>
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setQuickSaveIsNewCol(!quickSaveIsNewCol)}
-                      className="text-[10px] font-mono text-purple-400 hover:text-purple-300 underline"
-                    >
-                      {quickSaveIsNewCol ? 'Seleccionar existente' : '+ Crear nueva'}
-                    </button>
+                    {availableCollections.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuickSaveIsNewCol(!quickSaveIsNewCol);
+                          if (quickSaveError) setQuickSaveError(null);
+                        }}
+                        className="text-[10px] font-mono text-purple-400 hover:text-purple-300 underline"
+                      >
+                        {quickSaveIsNewCol ? 'Seleccionar existente' : '+ Crear nueva'}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-mono text-cyan-400/80">
+                        (Primera colección del sistema)
+                      </span>
+                    )}
                   </div>
 
                   {quickSaveIsNewCol || availableCollections.length === 0 ? (
                     <input
                       type="text"
                       value={quickSaveNewColName}
-                      onChange={(e) => setQuickSaveNewColName(e.target.value)}
-                      placeholder="Nombre de la nueva colección..."
+                      onChange={(e) => {
+                        setQuickSaveNewColName(e.target.value);
+                        if (quickSaveError) setQuickSaveError(null);
+                      }}
+                      placeholder="Nombre de la nueva colección (ej: Pruebas API Anime)..."
                       required
+                      maxLength={100}
                       className="w-full px-3 py-2 rounded-lg bg-[#050811] border border-purple-500/40 text-xs font-mono text-white focus:outline-none focus:border-purple-400"
                     />
                   ) : (
@@ -1304,7 +1397,10 @@ export default function App() {
                     </button>
                     <button
                       type="submit"
-                      disabled={!quickSaveReqName.trim()}
+                      disabled={
+                        !quickSaveReqName.trim() ||
+                        ((quickSaveIsNewCol || availableCollections.length === 0) && !quickSaveNewColName.trim())
+                      }
                       className="px-4 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono text-xs font-bold transition disabled:opacity-50"
                     >
                       GUARDAR

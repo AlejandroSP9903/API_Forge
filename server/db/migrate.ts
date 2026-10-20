@@ -28,9 +28,17 @@ export async function runMigrations(): Promise<MigrationResult> {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER
       );
     `);
+
+    // Intentar agregar columna updated_at si la tabla ya existía en versiones anteriores
+    try {
+      await client.execute(`ALTER TABLE projects ADD COLUMN updated_at INTEGER;`);
+    } catch {
+      // Ignorar si la columna ya existe
+    }
 
     // 3. Crear tabla api_endpoints con clave foránea hacia projects y borrado en cascada
     await client.execute(`
@@ -60,15 +68,28 @@ export async function runMigrations(): Promise<MigrationResult> {
       );
     `);
 
-    // 6. Crear tabla collections (Fase 1D)
+    // 6. Crear tabla collections (Fase 1D / Fase 2A)
     await client.execute(`
       CREATE TABLE IF NOT EXISTS collections (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+    `);
+
+    // Intentar agregar columna project_id si la tabla ya existía en versiones anteriores
+    try {
+      await client.execute(`ALTER TABLE collections ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;`);
+    } catch {
+      // Ignorar si la columna ya existe
+    }
+
+    // Índice para optimizar consultas de colecciones por proyecto
+    await client.execute(`
+      CREATE INDEX IF NOT EXISTS idx_collections_project_id ON collections(project_id);
     `);
 
     // 7. Crear tabla saved_requests (Fase 1D) con clave foránea hacia collections y borrado en cascada
